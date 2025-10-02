@@ -1,0 +1,8 @@
+# TUI Framework
+textual>=0.47.0
+
+# Future dependencies (not needed for this step)
+# whisper-live
+# faster-whisper
+# ollama
+# pyyaml

@@ -1,31 +1,12 @@
-#!/usr/bin/env python3
-"""
-Meeting Recorder - TUI-based meeting recording and transcription tool.
+#!/usr/bin/env bash
+# Meeting Recorder - Main entry point
 
-Entry point for the meeting recorder application.
-"""
+# Get the directory where the script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-import sys
-from pathlib import Path
+# Activate virtual environment
+source "$SCRIPT_DIR/venv/bin/activate"
 
-# Add src directory to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-
-from tui import run_tui
-
-
-def main():
-    """Main entry point."""
-    try:
-        run_tui()
-    except KeyboardInterrupt:
-        # Graceful shutdown on Ctrl+C
-        print("\n\nRecording stopped.")
-        sys.exit(0)
-    except Exception as e:
-        print(f"\n\nError: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+# Run the TUI
+cd "$SCRIPT_DIR"
+python3 src/tui.py

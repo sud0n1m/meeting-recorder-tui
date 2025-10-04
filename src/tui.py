@@ -215,7 +215,7 @@ class MeetingRecorderApp(App):
     def action_quit(self) -> None:
         """Handle quit action - process recording before exiting."""
         # Start processing in background worker
-        self.run_worker(self.process_recording, exclusive=True)
+        self.run_worker(self.process_recording, exclusive=True, thread=True)
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Handle worker state changes."""

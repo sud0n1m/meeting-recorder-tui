@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""
+Meeting transcript summarization using local LLM (Ollama).
+Generates structured summaries with key points, decisions, and action items.
+"""
+
+import json
+import requests
+from pathlib import Path
+from typing import Optional
+from datetime import datetime
+
+
+class Summarizer:
+    """Summarize meeting transcripts using local LLM via Ollama."""
+
+    def __init__(
+        self,
+        model: str = "llama3.2:3b",
+        endpoint: str = "http://localhost:11434"
+    ):
+        """
+        Initialize summarizer.
+
+        Args:
+            model: Ollama model name (e.g., llama3.2:3b, llama3.1:8b)
+            endpoint: Ollama API endpoint
+        """
+        self.model = model
+        self.endpoint = endpoint
+
+    def check_ollama(self) -> bool:
+        """Check if Ollama is running and model is available."""
+        try:
+            response = requests.get(f"{self.endpoint}/api/tags", timeout=5)
+            if response.status_code != 200:
+                return False
+
+            models = response.json().get("models", [])
+            model_names = [m["name"] for m in models]
+
+            if self.model not in model_names:
+                print(f"Warning: Model '{self.model}' not found in Ollama")
+                print(f"Available models: {model_names}")
+                return False
+
+            return True
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error connecting to Ollama: {e}")
+            return False
+
+    def summarize(self, transcript_text: str) -> str:
+        """
+        Generate structured summary from transcript.
+
+        Args:
+            transcript_text: Full meeting transcript
+
+        Returns:
+            Formatted summary with sections
+        """
+        prompt = self._build_prompt(transcript_text)
+
+        try:
+            response = requests.post(
+                f"{self.endpoint}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.3,  # Lower temperature for more focused output
+                        "top_p": 0.9,
+                    }
+                },
+                timeout=120  # 2 minutes max
+            )
+
+            if response.status_code != 200:
+                raise Exception(f"Ollama API error: {response.status_code}")
+
+            result = response.json()
+            summary = result.get("response", "").strip()
+
+            return summary
+
+        except Exception as e:
+            print(f"Error generating summary: {e}")
+            return f"Error: Could not generate summary - {e}"
+
+    def _build_prompt(self, transcript: str) -> str:
+        """Build structured prompt for summarization."""
+        return f"""You are a meeting minutes assistant. Read the following meeting transcript and create a structured summary.
+
+TRANSCRIPT:
+{transcript}
+
+Based on this transcript, provide a structured summary using EXACTLY this format:
+
+## Summary
+[2-3 sentences providing a high-level overview of the meeting]
+
+## Key Discussion Points
+- [Main topic discussed]
+- [Another key point]
+- [Additional points as needed]
+
+## Decisions Made
+- [Decision 1]
+- [Decision 2]
+- [List all firm decisions, or write "No explicit decisions made"]
+
+## Action Items
+- [ ] [Who] - [What to do] - [When/deadline if mentioned]
+- [ ] [Another action item]
+- [List all action items, or write "No action items identified"]
+
+## Open Questions
+- [Question or topic that needs follow-up]
+- [Another open question]
+- [List unresolved items, or write "No open questions"]
+
+Be concise, factual, and use bullet points. Do not add information not present in the transcript."""
+
+    def summarize_file(self, transcript_path: Path, output_path: Optional[Path] = None) -> Path:
+        """
+        Summarize a transcript file and save to markdown.
+
+        Args:
+            transcript_path: Path to transcript file
+            output_path: Optional output path (default: same dir, _summary.md)
+
+        Returns:
+            Path to summary file
+        """
+        # Read transcript
+        transcript_text = transcript_path.read_text()
+
+        # Generate summary
+        print(f"Generating summary with {self.model}...")
+        summary = self.summarize(transcript_text)
+
+        # Determine output path
+        if not output_path:
+            output_path = transcript_path.parent / transcript_path.name.replace("transcript_", "summary_").replace(".txt", ".md")
+
+        # Create summary with frontmatter
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        full_summary = f"""---
+date: {datetime.now().strftime("%Y-%m-%d")}
+time: {datetime.now().strftime("%H:%M")}
+transcript: {transcript_path.name}
+generated: {timestamp}
+model: {self.model}
+tags: [meeting, summary]
+---
+
+# Meeting Summary
+
+{summary}
+
+---
+*Generated by local LLM ({self.model}) at {timestamp}*
+"""
+
+        # Save summary
+        output_path.write_text(full_summary)
+        print(f"Summary saved: {output_path}")
+
+        return output_path
+
+
+def main():
+    """Test summarization with a sample transcript."""
+    from pathlib import Path
+
+    # Find a recent transcript
+    recordings_dir = Path("./recordings")
+    transcripts = sorted(recordings_dir.glob("transcript_*.txt"))
+
+    if not transcripts:
+        print("No transcripts found. Run test_transcribe.py first.")
+        return
+
+    latest_transcript = transcripts[-1]
+    print(f"Using transcript: {latest_transcript}")
+
+    # Create summarizer
+    summarizer = Summarizer(model="llama3.2:3b")
+
+    # Check Ollama
+    if not summarizer.check_ollama():
+        print("\nOllama is not ready. Make sure:")
+        print("1. Ollama is running")
+        print("2. Model is pulled: ollama pull llama3.2:3b")
+        return
+
+    # Generate summary
+    summary_path = summarizer.summarize_file(latest_transcript)
+
+    print("\n" + "="*60)
+    print("SUMMARY")
+    print("="*60)
+    print(summary_path.read_text())
+
+
+if __name__ == "__main__":
+    main()

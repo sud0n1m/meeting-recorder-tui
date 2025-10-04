@@ -1,0 +1,28 @@
+# Meeting Recorder Configuration
+
+# Output directory settings
+output_dir:
+  base_path: "/home/sudonim/Documents/Obsidian Vault"
+  meetings_subdir: "meetings"  # Subdirectory within base_path for meeting notes
+
+# Audio settings
+audio:
+  sample_rate: 16000
+  format: s16le
+  channels: 1
+
+# Transcription settings
+whisper:
+  model: base  # Options: tiny, base, small, medium, large
+  device: cpu  # Options: cpu, cuda, auto
+  language: en
+
+# Summarization settings
+summarization:
+  ollama_endpoint: "http://localhost:11434"
+  model: "llama3.2:3b"  # Or llama3.1:8b for better quality
+
+# Output settings
+output:
+  keep_audio: true  # Keep WAV files
+  timestamp_format: "%Y-%m-%d_%H-%M-%S"

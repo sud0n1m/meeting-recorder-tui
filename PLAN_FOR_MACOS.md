@@ -8,27 +8,30 @@ This document outlines the plan to port the Meeting Recorder TUI from Linux (Pip
 
 **Approach**: Hybrid architecture separating concerns by platform capabilities
 - **Swift binary**: Native audio capture (system + microphone) using Core Audio Tap API
-- **Python codebase**: Existing transcription, summarization, TUI, and file output (95% reusable)
+- **Python codebase**: Existing transcription, summarization, TUI, and file output (95% reusable via shared codebase)
 - **Integration**: Swift pipes raw PCM audio to stdout → Python reads from stdin
 - **Distribution**: Single `.app` bundle or bootstrap script
+- **UI Strategy**: Enhanced TUI with macOS styling (Phase 1), optional menu bar app (Phase 2)
 
-**Timeline Estimate**: 2-3 days for hybrid implementation
+**Timeline Estimate**: 3-4 days for hybrid implementation with shared codebase
 
 **Future Path**: Evaluate full Swift rewrite after validating hybrid approach
 
 ## Why Hybrid Architecture?
 
 ### Advantages ✅
+- **Maximize code reuse**: 95% of Python codebase shared between Linux and macOS
 - **Leverage existing code**: Keep all Python logic (transcription, LLM, TUI, Obsidian output)
 - **Native audio performance**: Use macOS-optimized APIs without compromises
 - **No external drivers**: Use ScreenCaptureKit/Core Audio Tap API (macOS 13+)
-- **Minimal changes**: ~50 LOC changes in Python, ~250 LOC new Swift code
+- **Maintainable**: Clean separation via platform abstraction layer
 - **Fast iteration**: Test audio capture independently from transcription pipeline
 
 ### Trade-offs ⚖️
 - Two languages to maintain (vs. pure Python or pure Swift)
 - Inter-process communication via pipes (minimal overhead)
 - Requires Xcode for building Swift binary (one-time, can distribute compiled)
+- Platform-specific UI considerations (can be addressed incrementally)
 
 ## macOS Audio Landscape
 
@@ -55,6 +58,348 @@ This document outlines the plan to port the Meeting Recorder TUI from Linux (Pip
 - AVAudioEngine for microphone (well-documented, stable)
 - Mix both streams in Swift, output to stdout as raw PCM
 - Similar to how [AudioTee](https://github.com/makeusabrew/audiotee) works
+
+## Shared Codebase Strategy
+
+### Code Sharing Overview
+
+**95% of Python code is platform-agnostic and will be shared:**
+
+| Module | Shared % | Platform-Specific Notes |
+|--------|----------|------------------------|
+| `transcribe.py` | 95% | Only audio input source differs |
+| `summarize.py` | 100% | Pure HTTP to Ollama, fully portable |
+| `markdown_writer.py` | 100% | Standard file I/O |
+| `config.py` | 100% | YAML parsing with platform overrides |
+| `tui.py` | 90% | Optional macOS-specific styling |
+| `audio_setup.py` | 0% | Platform-specific, needs abstraction |
+| `audio_monitor.py` | 30% | Platform-specific implementations |
+
+### Refactoring Plan: Platform Abstraction Layer
+
+To maximize code reuse, we'll introduce a factory pattern for platform-specific components:
+
+**Before** (Linux-only):
+```
+src/
+├── audio_setup.py        # PipeWire-specific
+├── audio_monitor.py      # parec-based
+├── transcribe.py
+└── tui.py
+```
+
+**After** (Cross-platform):
+```
+src/
+├── audio/
+│   ├── __init__.py              # Factory functions
+│   ├── base.py                  # Abstract base classes
+│   ├── setup_linux.py           # PipeWire implementation
+│   ├── setup_macos.py           # Swift binary wrapper
+│   ├── monitor_linux.py         # parec-based monitoring
+│   └── monitor_macos.py         # macOS audio monitoring
+├── transcribe.py                # Minimal changes
+├── summarize.py                 # No changes
+├── markdown_writer.py           # No changes
+├── config.py                    # Add platform detection
+└── tui.py                       # Optional macOS variant
+```
+
+### Platform Abstraction Implementation
+
+**src/audio/base.py** (new):
+```python
+from abc import ABC, abstractmethod
+from typing import Optional, Tuple
+
+class AudioCaptureBase(ABC):
+    """Abstract base class for platform-specific audio capture."""
+
+    @abstractmethod
+    def setup(self) -> bool:
+        """Initialize audio capture. Returns True on success."""
+        pass
+
+    @abstractmethod
+    def get_audio_stream(self):
+        """Return audio stream for reading (file handle or process stdout)."""
+        pass
+
+    @abstractmethod
+    def cleanup(self):
+        """Clean up audio capture resources."""
+        pass
+
+class AudioMonitorBase(ABC):
+    """Abstract base class for audio level monitoring."""
+
+    @abstractmethod
+    def start(self):
+        """Start monitoring audio levels."""
+        pass
+
+    @abstractmethod
+    def stop(self):
+        """Stop monitoring."""
+        pass
+
+    @abstractmethod
+    def get_levels(self) -> Tuple[float, float]:
+        """Return (mic_level, speaker_level) as floats 0.0-1.0."""
+        pass
+```
+
+**src/audio/__init__.py** (new):
+```python
+import platform
+from typing import Tuple
+
+from .base import AudioCaptureBase, AudioMonitorBase
+
+def create_audio_capture() -> AudioCaptureBase:
+    """Factory function - returns platform-specific audio capture."""
+    system = platform.system()
+
+    if system == "Darwin":
+        from .setup_macos import AudioCaptureSetupMacOS
+        return AudioCaptureSetupMacOS()
+    elif system == "Linux":
+        from .setup_linux import AudioCaptureSetupLinux
+        return AudioCaptureSetupLinux()
+    else:
+        raise RuntimeError(f"Unsupported platform: {system}")
+
+def create_audio_monitor(mic_source: str, speaker_source: str) -> AudioMonitorBase:
+    """Factory function - returns platform-specific audio monitor."""
+    system = platform.system()
+
+    if system == "Darwin":
+        from .monitor_macos import AudioLevelMonitorMacOS
+        return AudioLevelMonitorMacOS(mic_source, speaker_source)
+    elif system == "Linux":
+        from .monitor_linux import AudioLevelMonitorLinux
+        return AudioLevelMonitorLinux(mic_source, speaker_source)
+    else:
+        raise RuntimeError(f"Unsupported platform: {system}")
+```
+
+**src/tui.py** (updated imports):
+```python
+# Before:
+from audio_setup import AudioCaptureSetup
+from audio_monitor import AudioLevelMonitor
+
+# After:
+from audio import create_audio_capture, create_audio_monitor
+
+# Usage in on_mount():
+self.audio_setup = create_audio_capture()
+if not self.audio_setup.setup():
+    self.exit(message="Failed to setup audio capture")
+
+self.audio_monitor = create_audio_monitor(
+    self.audio_setup.mic_source,
+    self.audio_setup.speaker_source
+)
+```
+
+This refactoring ensures:
+- ✅ Single source of truth for TUI, transcription, and summarization logic
+- ✅ Clean separation of platform-specific code
+- ✅ Easy to test each platform independently
+- ✅ No duplication of business logic
+- ✅ Future platforms (Windows?) can be added easily
+
+## UI Strategy: Progressive Enhancement
+
+### Phase 1: Enhanced TUI (Cross-platform)
+
+**Goal**: Keep TUI functional on both platforms with optional macOS styling
+
+**Approach**: Single TUI with conditional styling
+```python
+# src/tui.py
+import platform
+
+class MeetingRecorderApp(App):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.is_macos = platform.system() == "Darwin"
+
+    @property
+    def CSS(self):
+        """Return platform-specific CSS"""
+        if self.is_macos:
+            return self._get_macos_css()
+        return self._get_linux_css()
+
+    def _get_macos_css(self):
+        return """
+        Screen {
+            align: center middle;
+            background: #1e1e1e;
+        }
+
+        #main-container {
+            width: 65;
+            height: auto;
+            border: rounded $accent;
+            padding: 2 3;
+            background: #2d2d2d;
+        }
+
+        .title {
+            text-align: center;
+            text-style: bold;
+            color: #0a84ff;  /* macOS system blue */
+        }
+
+        RecordingTimer {
+            text-align: center;
+            width: 100%;
+            margin: 1 0;
+            text-style: bold;
+            color: #30d158;  /* macOS system green */
+        }
+
+        /* Use SF Symbols-inspired characters */
+        """
+
+    def _get_linux_css(self):
+        # Existing Linux styling
+        return """..."""
+```
+
+**macOS-specific enhancements**:
+- Use ⌘ symbols instead of "Ctrl" in help text
+- macOS system colors (#0a84ff blue, #30d158 green, #ff453a red)
+- Rounded borders instead of heavy borders
+- SF Symbols-style emoji (🎙️ 🔴 ⏸ ⏹ 💾)
+
+**Bindings update**:
+```python
+@property
+def BINDINGS(self):
+    if self.is_macos:
+        return [("q", "quit", "⌘Q Quit")]
+    return [("q", "quit", "Quit")]
+```
+
+**Effort**: 2-3 hours
+**Timeline**: During Phase 2 (Python integration)
+
+### Phase 2: Menu Bar App (macOS-only, Optional)
+
+**Goal**: Native macOS experience with background recording
+
+**UI Design**:
+```
+Menu Bar:
+┌─────────────┐
+│ 🎙️ 00:15:23 │ ← Shows recording time
+└─────────────┘
+      │ (click)
+      ▼
+┌──────────────────────────┐
+│ 🔴 Recording Meeting     │
+│ ─────────────────────    │
+│ Duration: 00:15:23       │
+│ Microphone: 60%          │
+│ System Audio: 75%        │
+│ ─────────────────────    │
+│ ⏹ Stop & Process         │
+│ ⏸ Pause (coming soon)   │
+│ ⚙️ Settings...           │
+└──────────────────────────┘
+```
+
+**Implementation Options**:
+
+**Option A: Python + rumps** (easier, faster)
+```python
+# src/menubar_app.py
+import rumps
+from audio import create_audio_capture
+from transcribe import Transcriber
+
+class MeetingRecorderMenuBar(rumps.App):
+    def __init__(self):
+        super().__init__("🎙️", quit_button=None)
+        self.recording = False
+        self.start_time = None
+        self.timer = rumps.Timer(self.update_timer, 1)
+
+    @rumps.clicked("Start Recording")
+    def start_recording(self, sender):
+        self.recording = True
+        self.start_time = time.time()
+        self.audio_capture = create_audio_capture()
+        self.audio_capture.setup()
+        # ... start transcriber
+        self.timer.start()
+
+    @rumps.clicked("Stop Recording")
+    def stop_recording(self, sender):
+        self.recording = False
+        self.timer.stop()
+        # ... process recording
+
+    def update_timer(self, _):
+        if self.recording:
+            elapsed = int(time.time() - self.start_time)
+            hours = elapsed // 3600
+            minutes = (elapsed % 3600) // 60
+            seconds = elapsed % 60
+            self.title = f"🎙️ {hours:02d}:{minutes:02d}:{seconds:02d}"
+```
+
+**Dependencies**: `rumps` (Python menu bar framework)
+**Effort**: 1-2 days
+**Pros**: Shares all Python code, quick to implement
+**Cons**: Less polished than native Swift
+
+**Option B: Swift + AppKit** (more native)
+```swift
+// MenuBarController.swift
+class MenuBarController {
+    private var statusItem: NSStatusItem
+    private var menu: NSMenu
+    private var audioCapture: Process?
+    private var transcriber: PythonBridge  // Calls Python via subprocess
+
+    func startRecording() {
+        // Launch audio-capture binary
+        // Launch Python transcriber
+        // Update menu bar icon
+    }
+}
+```
+
+**Effort**: 3-4 days
+**Pros**: Most native experience, can use SF Symbols
+**Cons**: More complex Python↔Swift communication
+
+**Option C: Hybrid (Recommended for Phase 2)**
+- Swift menu bar UI (icon, timer, menu)
+- Launches Python TUI in hidden terminal on "Show Details"
+- Communicates via simple IPC (file-based status updates)
+
+**Decision**: Start without menu bar (Phase 1), evaluate after user testing
+
+### UI Decision Matrix
+
+| UI Approach | Timeline | Native Feel | Code Reuse | Complexity |
+|-------------|----------|-------------|------------|------------|
+| TUI (as-is) | Now | Low | 100% | Minimal |
+| TUI + macOS styling | +3 hours | Medium | 100% | Low |
+| Python menu bar (rumps) | +1-2 days | Medium | 95% | Medium |
+| Swift menu bar + TUI | +3-4 days | High | 90% | High |
+| Full Swift UI | +1-2 weeks | Highest | 0% | Very High |
+
+**Recommended Path**:
+1. **Phase 1**: TUI with macOS styling enhancements
+2. **Phase 2**: Evaluate menu bar based on feedback
+3. **Phase 3**: Consider full Swift rewrite if needed
 
 ## Architecture
 
@@ -163,40 +508,284 @@ class StdoutWriter {
 
 #### Python Integration Changes
 
-**File: `src/audio_setup.py`**
-- Add macOS detection: `platform.system() == "Darwin"`
-- If macOS, skip PipeWire setup
-- Launch Swift binary as subprocess: `subprocess.Popen(['./audio-capture'])`
-- Return process handle for cleanup
+**Phase 2.1: Refactor for Platform Abstraction** (Day 2, Morning)
 
-**File: `src/transcribe.py`**
-- Replace `parec` command with reading from subprocess stdout
-- Change from:
-  ```python
-  self.recording_process = subprocess.Popen(["parec", "--device", source_name, ...])
-  ```
-- To:
-  ```python
-  if platform.system() == "Darwin":
-      self.recording_process = subprocess.Popen(
-          ["./audio-capture", "--sample-rate", "16000"],
-          stdout=subprocess.PIPE
-      )
-      audio_stream = self.recording_process.stdout
-  else:
-      # Existing Linux/PipeWire code
-  ```
+1. **Create audio abstraction layer** (~2 hours)
+   - Create `src/audio/` directory
+   - Implement `base.py` with abstract base classes
+   - Move current `audio_setup.py` → `audio/setup_linux.py`
+   - Move current `audio_monitor.py` → `audio/monitor_linux.py`
+   - Create `audio/__init__.py` with factory functions
 
-**File: `src/audio_monitor.py`**
-- macOS alternative: Parse audio levels from Swift stderr output
-- Or: Disable real-time monitoring on macOS initially (MVP)
-- Future: Implement simple RMS calculation in Python from stdin
+2. **Update imports in existing files** (~30 minutes)
+   - `src/tui.py`: Use factory functions
+   - `src/transcribe.py`: Use abstract interfaces
+   - Add platform detection to `config.py`
 
-**File: `meeting-recorder` (launcher)**
-- Detect OS, set appropriate paths
-- Ensure Swift binary is executable and in correct location
+3. **Test Linux functionality** (~30 minutes)
+   - Verify no regressions on Linux
+   - All existing tests pass
 
-**Estimated Changes**: ~50-100 lines of Python modifications
+**Phase 2.2: Implement macOS Platform Layer** (Day 2, Afternoon)
+
+**File: `src/audio/setup_macos.py`** (new)
+```python
+from pathlib import Path
+import subprocess
+import platform
+from .base import AudioCaptureBase
+
+class AudioCaptureSetupMacOS(AudioCaptureBase):
+    """macOS audio capture using Swift binary."""
+
+    def __init__(self):
+        self.audio_process = None
+        self.binary_path = self._find_binary()
+
+    def _find_binary(self) -> Path:
+        """Locate audio-capture binary."""
+        # Try relative to project root
+        candidates = [
+            Path(__file__).parent.parent.parent / "bin" / "audio-capture",
+            Path("/usr/local/bin/audio-capture"),
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
+        raise FileNotFoundError("audio-capture binary not found")
+
+    def setup(self) -> bool:
+        """Launch Swift audio capture binary."""
+        try:
+            self.audio_process = subprocess.Popen(
+                [str(self.binary_path), "--sample-rate", "16000"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0
+            )
+            # Give it a moment to initialize
+            time.sleep(0.5)
+            if self.audio_process.poll() is not None:
+                return False  # Process died immediately
+            return True
+        except Exception as e:
+            print(f"Error starting audio capture: {e}")
+            return False
+
+    def get_audio_stream(self):
+        """Return stdout for reading audio data."""
+        if self.audio_process:
+            return self.audio_process.stdout
+        return None
+
+    def cleanup(self):
+        """Terminate Swift binary."""
+        if self.audio_process:
+            self.audio_process.terminate()
+            self.audio_process.wait(timeout=5)
+
+    @property
+    def mic_source(self) -> str:
+        """Return placeholder (not used on macOS)."""
+        return "macos-microphone"
+
+    @property
+    def speaker_source(self) -> str:
+        """Return placeholder (not used on macOS)."""
+        return "macos-system-audio"
+```
+
+**File: `src/audio/monitor_macos.py`** (new)
+```python
+from .base import AudioMonitorBase
+from typing import Tuple
+import numpy as np
+import threading
+import time
+
+class AudioLevelMonitorMacOS(AudioMonitorBase):
+    """
+    macOS audio level monitoring.
+
+    MVP: Returns mock levels (50% static)
+    Future: Parse levels from Swift binary stderr or calculate from audio stream
+    """
+
+    def __init__(self, mic_source: str, speaker_source: str):
+        self.running = False
+        self.mic_level = 0.5
+        self.speaker_level = 0.5
+
+    def start(self):
+        """Start monitoring (mock implementation for MVP)."""
+        self.running = True
+        # TODO: Implement real monitoring in future iteration
+
+    def stop(self):
+        """Stop monitoring."""
+        self.running = False
+
+    def get_levels(self) -> Tuple[float, float]:
+        """Return audio levels (mock for MVP)."""
+        # TODO: Calculate real levels from audio stream
+        return (self.mic_level, self.speaker_level)
+```
+
+**File: `src/transcribe.py`** (minimal changes)
+```python
+# Only change needed: use audio stream from setup
+def start_recording(self, source_name: str) -> bool:
+    """Start recording audio (platform-agnostic)."""
+    if self.running:
+        return False
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    self.audio_file = self.output_dir / f"recording_{timestamp}.wav"
+    self.transcript_file = self.output_dir / f"transcript_{timestamp}.txt"
+
+    try:
+        # Get audio stream from platform-specific setup
+        # (This assumes audio_setup passed in has already called setup())
+        audio_stream = self.audio_capture.get_audio_stream()
+
+        # Write to file as before
+        self.audio_file_handle = open(self.audio_file, "wb")
+
+        # Read from stream and write to file
+        # (Rest of implementation remains the same)
+        self.running = True
+        return True
+    except Exception as e:
+        print(f"Error starting recording: {e}")
+        return False
+```
+
+**File: `src/tui.py`** (macOS styling additions)
+```python
+import platform
+
+class MeetingRecorderApp(App):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.is_macos = platform.system() == "Darwin"
+
+    @property
+    def CSS(self):
+        """Platform-specific styling."""
+        if self.is_macos:
+            return self._macos_css()
+        return self._linux_css()
+
+    def _macos_css(self):
+        return """
+        Screen {
+            align: center middle;
+            background: #1a1a1a;
+        }
+
+        #main-container {
+            width: 65;
+            height: auto;
+            border: rounded #0a84ff;
+            padding: 2 3;
+            background: #2d2d2d;
+        }
+
+        .title {
+            text-align: center;
+            text-style: bold;
+            color: #0a84ff;
+            margin-bottom: 1;
+        }
+
+        RecordingTimer {
+            text-align: center;
+            width: 100%;
+            margin: 1 0;
+            text-style: bold;
+            color: #30d158;
+        }
+
+        AudioLevelMeter {
+            width: 100%;
+            margin: 0 0;
+            color: #0a84ff;
+        }
+
+        .instruction {
+            text-align: center;
+            color: #8e8e93;
+            margin-top: 1;
+        }
+
+        StatusMessage {
+            text-align: center;
+            width: 100%;
+            margin: 1 0;
+            color: #30d158;
+        }
+        """
+
+    def _linux_css(self):
+        # Existing CSS
+        return """..."""
+
+    @property
+    def BINDINGS(self):
+        if self.is_macos:
+            return [("q", "quit", "⌘Q Quit")]
+        return [("q", "quit", "Quit")]
+
+    def compose(self) -> ComposeResult:
+        """Create child widgets (platform-agnostic)."""
+        with Container(id="main-container"):
+            yield Static("Meeting Recorder", classes="title")
+            yield RecordingTimer()
+            with Container(classes="levels-container"):
+                yield AudioLevelMeter("Microphone:", id="mic-level")
+                yield AudioLevelMeter("System Audio:" if self.is_macos else "Speakers:", id="speaker-level")
+            yield StatusMessage(id="status")
+
+            # Platform-specific instruction text
+            if self.is_macos:
+                yield Static("Press ⌘Q or Ctrl+C to stop", classes="instruction")
+            else:
+                yield Static("Press 'q' or Ctrl+C to stop recording", classes="instruction")
+```
+
+**File: `config.py`** (add platform overrides)
+```python
+import platform
+import yaml
+from pathlib import Path
+
+class Config:
+    def __init__(self, config_path: Path = None):
+        if config_path is None:
+            config_path = Path(__file__).parent.parent / "config.yaml"
+
+        with open(config_path) as f:
+            data = yaml.safe_load(f)
+
+        # Apply platform-specific overrides
+        system = platform.system()
+        if system in data:
+            self._apply_overrides(data, data[system])
+
+        # Load settings
+        self.whisper_model = data['whisper']['model']
+        # ... rest of config
+
+    def _apply_overrides(self, base: dict, overrides: dict):
+        """Merge platform-specific config."""
+        for key, value in overrides.items():
+            if isinstance(value, dict) and key in base:
+                self._apply_overrides(base[key], value)
+            else:
+                base[key] = value
+```
+
+**Estimated Changes**: ~200-300 lines (mostly new files, minimal changes to existing)
 
 ### Packaging Structure
 
@@ -259,7 +848,43 @@ python3 "$SCRIPT_DIR/src/tui.py"
 
 ## Implementation Phases
 
-### Phase 1: Swift Audio Capture CLI (Days 1-2)
+### Phase 0: Codebase Refactoring (Day 1, Morning - 3 hours)
+
+**Goal**: Refactor existing Linux codebase for cross-platform support
+
+**Tasks**:
+1. **Create platform abstraction layer** (1.5 hours)
+   - Create `src/audio/` directory structure
+   - Define abstract base classes in `audio/base.py`
+   - Create factory functions in `audio/__init__.py`
+
+2. **Migrate Linux code** (1 hour)
+   - Rename `src/audio_setup.py` → `src/audio/setup_linux.py`
+   - Rename `src/audio_monitor.py` → `src/audio/monitor_linux.py`
+   - Update class names to match new convention
+   - Ensure both inherit from base classes
+
+3. **Update imports** (30 minutes)
+   - Update `src/tui.py` to use factory functions
+   - Update `src/transcribe.py` if needed
+   - Update any test files
+
+4. **Test Linux functionality** (30 minutes)
+   - Run on Linux system
+   - Verify no regressions
+   - Ensure all features work as before
+
+**Deliverables**:
+- Refactored codebase with platform abstraction
+- All Linux functionality preserved
+- Clean foundation for macOS implementation
+
+**Validation Criteria**:
+- ✅ Linux version runs without changes from user perspective
+- ✅ Code structure supports easy platform additions
+- ✅ No functionality lost in refactoring
+
+### Phase 1: Swift Audio Capture CLI (Day 1 Afternoon - Day 2)
 
 **Goal**: Build standalone Swift binary that captures system + mic audio and outputs to stdout
 
@@ -322,39 +947,50 @@ print(f'Duration: {len(data) / (16000 * 2)} seconds')
 - ✅ Runs for >5 minutes without crashes
 - ✅ Clean shutdown on Ctrl+C
 
-### Phase 2: Python Integration (Day 2)
+### Phase 2: Python macOS Integration (Day 2-3)
 
-**Goal**: Modify Python codebase to read from Swift binary instead of PipeWire
+**Goal**: Implement macOS platform layer and add UI enhancements
 
-**Tasks**:
-1. **Platform Detection**
-   - Add `platform.system()` checks in audio modules
-   - Create `src/audio_setup_macos.py` for macOS-specific logic
-   - Keep Linux code unchanged (use conditional imports)
+**Tasks** (broken into sub-phases):
 
-2. **Update `src/transcribe.py`**
-   - Replace `parec` subprocess with `audio-capture` subprocess
-   - Read from `process.stdout` instead of audio file handle
-   - Handle process lifecycle (start, monitor, stop)
+**Phase 2.1: Implement macOS Platform Layer** (Day 2, 4 hours)
+1. **Create macOS audio capture wrapper** (2 hours)
+   - Implement `src/audio/setup_macos.py`
+   - Launch Swift binary as subprocess
+   - Handle binary discovery and validation
+   - Implement cleanup methods
 
-3. **Update `src/audio_monitor.py`**
-   - Option 1: Disable real-time level display on macOS (MVP)
-   - Option 2: Calculate RMS from audio stream in Python
-   - Document limitation in README if needed
+2. **Create macOS audio monitor** (1 hour)
+   - Implement `src/audio/monitor_macos.py`
+   - MVP: Return static/mock levels
+   - Document future enhancement for real levels
 
-4. **Update Launcher Script**
-   - Detect macOS vs. Linux
-   - Set correct binary paths
-   - Check for Swift binary before starting
+3. **Update configuration** (30 minutes)
+   - Add macOS section to `config.yaml`
+   - Add platform overrides support
+   - Test config loading on both platforms
 
-5. **Configuration Updates**
-   - Add `macos` section to `config.yaml`:
-     ```yaml
-     macos:
-       audio_capture_binary: "./bin/audio-capture"
-       enable_system_audio: true
-       enable_microphone: true
-     ```
+4. **Test basic integration** (30 minutes)
+   - Test Swift binary launches correctly
+   - Verify audio stream pipes to Python
+   - Check cleanup on exit
+
+**Phase 2.2: Add macOS UI Enhancements** (Day 3, 3 hours)
+1. **Implement macOS-specific styling** (1.5 hours)
+   - Add `_macos_css()` method to TUI
+   - Use macOS system colors
+   - Use rounded borders and SF Symbols
+   - Platform-specific keybinding hints
+
+2. **Update UI text for macOS** (30 minutes)
+   - Change "Speakers" → "System Audio"
+   - Use ⌘ instead of Ctrl in instructions
+   - Add macOS-specific status messages
+
+3. **Polish and test** (1 hour)
+   - Test TUI appearance on macOS
+   - Ensure responsive layout
+   - Verify colors render correctly in different terminals
 
 **Testing**:
 ```bash
@@ -385,7 +1021,7 @@ print(f'Duration: {len(data) / (16000 * 2)} seconds')
 - ✅ Clean error messages if Swift binary missing
 - ✅ Graceful shutdown cleans up processes
 
-### Phase 3: App Bundle Packaging (Day 3)
+### Phase 3: App Bundle Packaging (Day 4)
 
 **Goal**: Package as single-command distribution (`.app` or polished script)
 
@@ -434,7 +1070,7 @@ open MeetingRecorder.app
 - ✅ No dependency on system Python or Xcode
 - ✅ Works on fresh macOS install (13+)
 
-### Phase 4: Testing & Documentation (Day 3)
+### Phase 4: Testing & Documentation (Day 4-5)
 
 **Goal**: Validate reliability and document usage
 
@@ -902,20 +1538,25 @@ def test_end_to_end_transcription():
 ## Success Criteria
 
 **MVP (Minimum Viable Product)**:
-- [x] Single-command launch: `./meeting-recorder` or double-click `.app`
-- [x] Records system audio + microphone without external drivers
-- [x] Transcription works accurately (>90% for clear speech)
-- [x] Summary generated with structured format
-- [x] Files saved to Obsidian vault correctly
-- [x] Works on macOS 13+
-- [x] Graceful shutdown on 'q' or Ctrl+C
+- [ ] 95% code reuse between Linux and macOS platforms
+- [ ] Clean platform abstraction with factory pattern
+- [ ] Single-command launch: `./meeting-recorder` or double-click `.app`
+- [ ] Records system audio + microphone without external drivers
+- [ ] Transcription works accurately (>90% for clear speech)
+- [ ] Summary generated with structured format
+- [ ] Files saved to Obsidian vault correctly
+- [ ] Works on macOS 13+
+- [ ] Graceful shutdown on 'q' or Ctrl+C
+- [ ] macOS-specific UI enhancements (styling, keybindings)
 
 **Quality Targets**:
-- [x] Setup time <10 minutes for new user
-- [x] No crashes during 60-minute recording
-- [x] Transcription time <2x real-time
-- [x] CPU usage <50% during recording (M1/M2)
-- [x] Clear error messages for all failure modes
+- [ ] No regressions on Linux after refactoring
+- [ ] Setup time <10 minutes for new user
+- [ ] No crashes during 60-minute recording
+- [ ] Transcription time <2x real-time
+- [ ] CPU usage <50% during recording (M1/M2/M3)
+- [ ] Clear error messages for all failure modes
+- [ ] Maintainable codebase (easy to add new platforms)
 
 ## Resources
 
@@ -938,11 +1579,45 @@ def test_end_to_end_transcription():
 
 ## Next Steps
 
-1. **Immediate**: Set up Swift project structure, implement basic Core Audio Tap capture
-2. **Day 1**: Complete Swift audio capture binary with tests
-3. **Day 2**: Integrate with Python codebase, test end-to-end
-4. **Day 3**: Package as `.app` bundle, create distribution
-5. **Post-MVP**: Gather user feedback, evaluate full Swift rewrite
+### Updated Timeline (with Shared Codebase)
+
+**Day 1 Morning**: Refactor codebase for cross-platform support
+- Create platform abstraction layer
+- Migrate Linux code to new structure
+- Test Linux functionality
+
+**Day 1 Afternoon - Day 2**: Build Swift audio capture binary
+- Implement Core Audio Tap + AVAudioEngine
+- Test audio capture independently
+- Verify PCM output format
+
+**Day 2-3**: Implement macOS platform layer
+- Create macOS audio capture wrapper
+- Add macOS UI enhancements
+- Test end-to-end on macOS
+
+**Day 4**: Package and distribute
+- Create `.app` bundle or bootstrap script
+- Test on clean macOS install
+- Document setup process
+
+**Day 4-5**: Testing and polish
+- Long recording tests
+- Edge case handling
+- Documentation updates
+
+**Post-MVP**: Gather user feedback, evaluate menu bar app or full Swift rewrite
+
+### Implementation Order (Recommended)
+
+1. ✅ **Read and understand PLAN_FOR_MACOS.md** (you are here)
+2. **Phase 0**: Refactor for shared codebase (~3 hours)
+3. **Phase 1**: Swift audio capture (~1 day)
+4. **Phase 2**: macOS Python integration (~1 day)
+5. **Phase 3**: Packaging (~0.5 day)
+6. **Phase 4**: Testing (~0.5-1 day)
+
+Total: **3-4 days** for fully functional hybrid macOS port with shared codebase
 
 ## Appendix: Example Code Snippets
 

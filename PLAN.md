@@ -905,7 +905,135 @@ processing:
 
 ---
 
-## Future Enhancements (v0.4+)
+## Version 0.4 - Planned Features
+
+### Feature 1: Speaker Detection and Diarization
+
+**Goal**: Identify and label different speakers in meeting recordings.
+
+**Use Cases**:
+- Distinguish between the user (microphone audio) and other participants (speaker audio)
+- Identify unique speakers in multi-person meetings
+- Allow user to name speakers for better transcript readability
+- Track who said what in meeting notes
+
+**Proposed Approach**:
+
+**Step 1: Simple Mic/Speaker Separation**
+- Mic audio → Tag as "You" or user's configured name
+- Speaker audio → Tag as "Remote" or "Other Participants"
+- Leverages existing audio routing (mic vs speakers are already separate sources)
+
+**Step 2: Speaker Diarization** (More Advanced)
+- Use pyannote.audio or similar for speaker diarization
+- Detect number of unique speakers in audio
+- Assign labels: Speaker 1, Speaker 2, etc.
+- Allow user to rename speakers after recording
+
+**Implementation Options**:
+
+**Option A: Simple Mic/Speaker Labels** (Easiest)
+```
+Transcription Output:
+[You]: Let's discuss the roadmap
+[Remote]: Sounds good, I have some ideas
+[You]: Great, let's hear them
+```
+- Pros: Very simple, uses existing audio separation
+- Cons: All remote speakers grouped together
+
+**Option B: pyannote.audio Diarization** (Better Quality)
+- Use pyannote/speaker-diarization pipeline
+- Requires GPU for reasonable speed
+- Can identify 2-10+ unique speakers
+- Output with timestamps: "Speaker 1: 00:00-00:15", etc.
+
+**Option C: WhisperX with Diarization** (Best Integration)
+- WhisperX combines Whisper + diarization
+- Better alignment of text with speakers
+- Single pipeline for transcription + speaker labels
+- https://github.com/m-bain/whisperX
+
+**Recommended: WhisperX**
+
+**Architecture**:
+```
+Audio Recording (separate mic/speaker streams)
+         ↓
+    Merge for transcription
+         ↓
+WhisperX Pipeline:
+  1. Transcribe with Whisper
+  2. Align timestamps (forced alignment)
+  3. Diarize speakers (pyannote)
+  4. Assign text to speakers
+         ↓
+Transcript with Speaker Labels:
+[Speaker 1]: Hello everyone
+[Speaker 2]: Hi, thanks for joining
+[Speaker 1]: Let's get started
+```
+
+**User Workflow**:
+1. Record meeting as usual
+2. After processing, transcript shows: Speaker 1, Speaker 2, etc.
+3. Option to rename speakers:
+   - "Press [N] to name speakers"
+   - Shows sample quotes from each speaker
+   - User types: "Speaker 1 → John, Speaker 2 → Sarah"
+4. Transcript updated with real names
+5. Names saved for future meetings (optional)
+
+**Configuration**:
+```yaml
+diarization:
+  enabled: true
+  method: "whisperx"  # Options: simple, whisperx, pyannote
+  min_speakers: 2
+  max_speakers: 10
+  device: "cuda"  # GPU recommended
+
+user:
+  name: "You"  # Label for microphone audio
+  known_speakers:
+    - "John Doe"
+    - "Sarah Smith"
+```
+
+**Implementation Tasks**:
+1. Install WhisperX: `pip install whisperx`
+2. Create `diarization.py` module
+3. Integrate with transcription pipeline
+4. Add speaker labeling to transcript output
+5. Create speaker naming UI/prompt
+6. Update markdown writer to include speaker labels
+7. Add speaker name persistence
+
+**Dependencies**:
+- whisperx (includes pyannote.audio)
+- PyTorch with CUDA (for GPU acceleration)
+- ~2GB additional model downloads
+
+**Challenges**:
+- GPU highly recommended (CPU diarization is slow)
+- Accuracy varies with audio quality
+- Background noise can confuse speaker detection
+- Need clear audio separation
+
+**Simple Implementation First** (v0.4):
+- Start with mic/speaker separation (Option A)
+- Label mic as "You", speaker as "Remote"
+- Test with real meetings
+- Gather feedback before full diarization
+
+**Advanced Implementation** (v0.5):
+- Add WhisperX full diarization
+- Speaker naming UI
+- Speaker persistence
+
+---
+
+## Future Enhancements (v0.5+)
 
 ### Live Transcription Display
 

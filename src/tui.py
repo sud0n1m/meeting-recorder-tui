@@ -23,6 +23,7 @@ from transcribe import Transcriber
 from summarize import Summarizer
 from markdown_writer import MarkdownWriter
 from config import Config
+from processing_queue import ProcessingQueue, ProcessingJob
 
 
 class AppState(Enum):
@@ -81,6 +82,7 @@ class MeetingRecorderApp(App):
         self.transcriber: Optional[Transcriber] = None
         self.title_input: Optional[Input] = None
         self.is_editing_title: bool = False
+        self.processing_queue: Optional[ProcessingQueue] = None
 
     def compose(self) -> ComposeResult:
         """Create UI."""
@@ -91,7 +93,16 @@ class MeetingRecorderApp(App):
 
     def on_mount(self) -> None:
         """Initialize app."""
-        self.title = "Meeting Recorder v0.2"
+        self.title = "Meeting Recorder v0.3"
+
+        # Initialize processing queue
+        self.processing_queue = ProcessingQueue(self.config, max_size=5)
+        self.processing_queue.set_status_callback(self._on_job_status_change)
+        self.processing_queue.start()
+
+        # Update dashboard periodically to show queue status
+        self.set_interval(2, self._update_dashboard_if_ready)
+
         self.show_dashboard()
 
     def show_dashboard(self) -> None:
@@ -99,17 +110,37 @@ class MeetingRecorderApp(App):
         self.state = AppState.READY
         content = self.query_one("#main-content", Static)
 
+        # Get processing queue status
+        queue_status = ""
+        if self.processing_queue:
+            status = self.processing_queue.get_status()
+            if status["processing"] > 0 or status["pending"] > 0:
+                queue_status = f"\nProcessing Status:\n  ⏳ {status['processing']} processing, {status['pending']} pending"
+            elif status["completed"] > 0:
+                queue_status = f"\n  ✅ {status['completed']} recordings saved"
+
         dashboard = f"""🎙️  Ready to Record
 
 Configuration:
   • Whisper: {self.config.whisper_model} ({self.config.whisper_device})
   • Output: {self.config.meetings_dir}
-  • LLM: {self.config.ollama_model}
+  • LLM: {self.config.ollama_model}{queue_status}
 
 Press [R] or [Enter] to Start Recording
 Press [Q] to Quit"""
 
         content.update(dashboard)
+
+    def _update_dashboard_if_ready(self) -> None:
+        """Update dashboard if in READY state (to show processing progress)."""
+        if self.state == AppState.READY:
+            self.show_dashboard()
+
+    def _on_job_status_change(self, job: ProcessingJob) -> None:
+        """Callback when processing job status changes."""
+        # Refresh dashboard if visible
+        if self.state == AppState.READY:
+            self.show_dashboard()
 
     def action_start_recording(self) -> None:
         """Start recording."""
@@ -218,20 +249,46 @@ Press [S] to Stop & Save  |  [C] to Cancel  |  [T] to Edit Title"""
             self.show_recording_screen()
 
     def action_stop_and_save(self) -> None:
-        """Stop recording and save."""
+        """Stop recording and enqueue for background processing."""
         if self.state != AppState.RECORDING:
             return
 
-        self.state = AppState.PROCESSING
         content = self.query_one("#main-content", Static)
-        content.update("⏹️  Stopping recording...\nPlease wait...")
+        content.update("⏹️  Stopping recording...")
 
         # Stop the update interval
         for timer in self._timers:
             timer.stop()
 
-        # Process in background
-        self.run_worker(self.process_recording, exclusive=True, thread=True)
+        # Stop recording
+        if self.transcriber:
+            self.transcriber.stop_recording()
+
+        # Cleanup audio monitoring
+        if self.audio_monitor:
+            self.audio_monitor.stop()
+        if self.audio_setup:
+            self.audio_setup.cleanup()
+
+        # Enqueue for background processing
+        if self.transcriber and self.transcriber.audio_file and self.transcriber.audio_file.exists():
+            try:
+                job_id = self.processing_queue.enqueue(
+                    audio_file=self.transcriber.audio_file,
+                    timestamp=self.recording_timestamp,
+                    title=self._sanitize_title(self.meeting_title)
+                )
+                content.update(f"✅ Recording queued for processing!\n\nJob ID: {job_id}\n\nReturning to dashboard...")
+                time.sleep(2)
+            except Exception as e:
+                content.update(f"❌ Error queuing recording: {str(e)}\n\nPress [Q] to quit or [R] to try again")
+                time.sleep(3)
+        else:
+            content.update("⚠️  No audio recorded")
+            time.sleep(2)
+
+        # Return to dashboard
+        self.show_dashboard()
 
     def action_cancel_recording(self) -> None:
         """Cancel recording without saving."""
@@ -261,75 +318,15 @@ Press [S] to Stop & Save  |  [C] to Cancel  |  [T] to Edit Title"""
         time.sleep(1)
         self.show_dashboard()
 
-    def process_recording(self) -> None:
-        """Process the recording: transcribe, summarize, save."""
-        content = self.query_one("#main-content", Static)
-
-        try:
-            # Stop recording
-            content.update("⏹️  Stopping recording...")
-            if self.transcriber:
-                self.transcriber.stop_recording()
-                time.sleep(1)
-
-            # Cleanup audio
-            if self.audio_monitor:
-                self.audio_monitor.stop()
-            if self.audio_setup:
-                self.audio_setup.cleanup()
-
-            # Load Whisper model
-            content.update("📥 Loading transcription model...")
-            if not self.transcriber.model:
-                self.transcriber.load_model()
-
-            # Transcribe
-            if self.transcriber.audio_file and self.transcriber.audio_file.exists():
-                content.update("📝 Transcribing audio...\nThis may take a few minutes...")
-                self.transcriber.transcribe_audio(self.transcriber.audio_file)
-
-                # Summarize
-                if self.transcriber.transcript_file and self.transcriber.transcript_file.exists():
-                    content.update("🤖 Generating summary...")
-
-                    # Initialize summarizer
-                    summarizer = Summarizer(
-                        model=self.config.ollama_model,
-                        endpoint=self.config.ollama_endpoint
-                    )
-                    markdown_writer = MarkdownWriter(
-                        output_dir=self.config.meetings_dir
-                    )
-
-                    summary_path = summarizer.summarize_file(
-                        self.transcriber.transcript_file
-                    )
-
-                    # Save to markdown with sanitized title
-                    content.update("💾 Saving to vault...")
-                    sanitized_title = self._sanitize_title(self.meeting_title)
-                    result = markdown_writer.write_meeting(
-                        transcript_path=self.transcriber.transcript_file,
-                        summary_path=summary_path,
-                        audio_path=self.transcriber.audio_file if self.config.keep_audio else None,
-                        timestamp=self.recording_timestamp,
-                        title=sanitized_title
-                    )
-
-                    content.update(f"✅ Saved! ({len(result)} files)\n\nPress [Q] to quit or [R] to record again")
-                    self.state = AppState.READY
-                else:
-                    content.update("⚠️  No transcript generated")
-                    time.sleep(2)
-                    self.show_dashboard()
-            else:
-                content.update("⚠️  No audio recorded")
-                time.sleep(2)
-                self.show_dashboard()
-
-        except Exception as e:
-            content.update(f"❌ Error: {str(e)}\n\nPress [Q] to quit or [R] to try again")
-            self.state = AppState.READY
+    def on_unmount(self) -> None:
+        """Cleanup when app closes."""
+        # Stop processing queue
+        if self.processing_queue:
+            status = self.processing_queue.get_status()
+            if status["pending"] > 0 or status["processing"] > 0:
+                print(f"\n⚠️  Warning: {status['pending'] + status['processing']} recordings still processing")
+                print("Please wait for processing to complete or they will be lost.")
+            self.processing_queue.stop(wait=False)
 
     def _sanitize_title(self, title: str) -> str:
         """Sanitize title for filename."""

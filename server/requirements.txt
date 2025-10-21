@@ -1,0 +1,20 @@
+# FastAPI Server Requirements
+
+# Web framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6  # For file uploads
+
+# Transcription
+faster-whisper>=0.10.0
+
+# GPU Support (Optional - install based on hardware)
+# For NVIDIA GPUs with CUDA:
+# torch>=2.0.0  # Will auto-detect CUDA
+# For CPU only: no additional packages needed
+
+# LLM Integration
+requests>=2.31.0
+
+# Utilities
+python-dotenv>=1.0.0  # For environment variables

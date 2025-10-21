@@ -907,9 +907,594 @@ processing:
 
 ## Version 0.4 - Planned Features
 
-### Feature 1: Speaker Detection and Diarization
+### Option A: Client-Server Architecture with Remote Processing (Recommended)
 
-**Goal**: Identify and label different speakers in meeting recordings.
+**Goal**: Separate frontend (recording) from backend (processing) to enable:
+- Offload heavy processing to powerful server
+- Support for GPU-accelerated diarization on server
+- Lightweight client that just records audio
+- Process multiple recordings in parallel on server
+- Share processing server across multiple users/machines
+
+**Architecture**:
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         CLIENT                               │
+│  (Laptop/Desktop - Any Machine)                             │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Meeting Recorder TUI                                 │  │
+│  │  - Record audio (mic + speakers)                      │  │
+│  │  - Edit meeting title                                 │  │
+│  │  - Upload audio to server                            │  │
+│  │  - Poll for results                                  │  │
+│  │  - Save to local Obsidian vault                      │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                          ↓ HTTP/REST API                    │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│                         SERVER                               │
+│  (firecorn.net - Powerful GPU Server)                       │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Processing API Server (FastAPI/Flask)               │  │
+│  │  - Receive audio uploads                             │  │
+│  │  - Queue processing jobs                             │  │
+│  │  - Manage worker pool                                │  │
+│  │  - Return results                                    │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                          ↓                                   │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Processing Workers (GPU-accelerated)                │  │
+│  │  1. Transcription (faster-whisper/WhisperX)          │  │
+│  │  2. Diarization (pyannote.audio)                     │  │
+│  │  3. Summarization (Ollama/local LLM)                 │  │
+│  │  4. Package results                                  │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                          ↓                                   │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Storage (temporary)                                  │  │
+│  │  - Audio files (uploaded)                            │  │
+│  │  - Transcripts                                       │  │
+│  │  - Summaries                                         │  │
+│  │  - Results ready for download                       │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Client-Server Protocol**:
+
+**1. Upload Recording**
+```http
+POST /api/recordings/upload
+Content-Type: multipart/form-data
+
+{
+  "audio_file": <file>,
+  "title": "Team Standup",
+  "timestamp": "2025-10-19T14:30:00Z",
+  "user_id": "optional-user-id",
+  "config": {
+    "whisper_model": "medium",
+    "diarization_enabled": true,
+    "min_speakers": 2,
+    "max_speakers": 10
+  }
+}
+
+Response:
+{
+  "job_id": "20251019_143000_team-standup",
+  "status": "queued",
+  "estimated_time": "5-10 minutes"
+}
+```
+
+**2. Check Status**
+```http
+GET /api/recordings/{job_id}/status
+
+Response:
+{
+  "job_id": "20251019_143000_team-standup",
+  "status": "processing",  // queued, processing, completed, failed
+  "progress": {
+    "transcription": "completed",
+    "diarization": "in_progress",
+    "summarization": "pending"
+  },
+  "estimated_remaining": "2 minutes"
+}
+```
+
+**3. Download Results**
+```http
+GET /api/recordings/{job_id}/results
+
+Response:
+{
+  "job_id": "20251019_143000_team-standup",
+  "status": "completed",
+  "results": {
+    "transcript": "Full transcript text with speaker labels...",
+    "summary": "Meeting summary with decisions and action items...",
+    "speakers": [
+      {"id": "SPEAKER_00", "label": "You", "duration": 180},
+      {"id": "SPEAKER_01", "label": "Speaker 1", "duration": 240}
+    ],
+    "duration": 1800,
+    "word_count": 2500
+  },
+  "download_urls": {
+    "transcript": "/api/recordings/{job_id}/download/transcript",
+    "summary": "/api/recordings/{job_id}/download/summary",
+    "audio": "/api/recordings/{job_id}/download/audio"
+  }
+}
+```
+
+**Client Implementation Changes**:
+
+**New Module: `api_client.py`**
+```python
+class ProcessingAPIClient:
+    """Client for remote processing server."""
+
+    def __init__(self, server_url: str, api_key: Optional[str] = None):
+        self.server_url = server_url
+        self.api_key = api_key
+
+    def upload_recording(self, audio_file: Path, title: str,
+                        timestamp: datetime, config: dict) -> str:
+        """Upload recording and return job_id."""
+
+    def get_status(self, job_id: str) -> dict:
+        """Get processing status."""
+
+    def get_results(self, job_id: str) -> dict:
+        """Download completed results."""
+
+    def poll_until_complete(self, job_id: str,
+                           callback: Callable = None) -> dict:
+        """Poll until job completes, calling callback with progress."""
+```
+
+**Updated `processing_queue.py`**:
+```python
+class ProcessingQueue:
+    def __init__(self, config: Config, mode: str = "local"):
+        self.mode = mode  # "local" or "remote"
+
+        if mode == "remote":
+            self.api_client = ProcessingAPIClient(
+                server_url=config.processing_server_url,
+                api_key=config.processing_api_key
+            )
+        else:
+            # Existing local processing
+            ...
+
+    def enqueue(self, audio_file: Path, timestamp: datetime, title: str) -> str:
+        if self.mode == "remote":
+            # Upload to server
+            job_id = self.api_client.upload_recording(
+                audio_file, title, timestamp, self._get_config()
+            )
+            # Start polling in background
+            self._start_polling(job_id)
+            return job_id
+        else:
+            # Existing local processing
+            ...
+```
+
+**Server Implementation**:
+
+**FastAPI Server Structure**:
+```
+server/
+├── main.py              # FastAPI app
+├── models.py            # Pydantic models
+├── processing/
+│   ├── transcribe.py    # Whisper/WhisperX
+│   ├── diarize.py       # pyannote.audio
+│   ├── summarize.py     # LLM summarization
+│   └── worker.py        # Celery/RQ worker
+├── storage/
+│   ├── uploads/         # Temporary audio files
+│   └── results/         # Processed results
+└── config.py
+```
+
+**Server `main.py`** (FastAPI):
+```python
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import FileResponse
+import shutil
+from pathlib import Path
+from datetime import datetime
+
+app = FastAPI()
+
+@app.post("/api/recordings/upload")
+async def upload_recording(
+    audio_file: UploadFile = File(...),
+    title: str = Form(...),
+    timestamp: str = Form(...),
+    config: str = Form(...)  # JSON string
+):
+    # Save uploaded file
+    job_id = generate_job_id(title, timestamp)
+    upload_path = save_upload(audio_file, job_id)
+
+    # Queue processing job
+    queue_processing(job_id, upload_path, title, timestamp, config)
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "estimated_time": "5-10 minutes"
+    }
+
+@app.get("/api/recordings/{job_id}/status")
+async def get_status(job_id: str):
+    status = get_job_status(job_id)
+    return status
+
+@app.get("/api/recordings/{job_id}/results")
+async def get_results(job_id: str):
+    results = load_results(job_id)
+    return results
+
+@app.get("/api/recordings/{job_id}/download/{file_type}")
+async def download_file(job_id: str, file_type: str):
+    file_path = get_result_file(job_id, file_type)
+    return FileResponse(file_path)
+```
+
+**Configuration**:
+
+**Client `config.yaml`**:
+```yaml
+# Processing mode
+processing:
+  mode: "remote"  # Options: local, remote
+
+  # Remote server settings
+  remote:
+    server_url: "https://ollama.firecorn.net:8000"
+    api_key: "optional-api-key"
+    poll_interval: 5  # seconds
+    timeout: 1800  # 30 minutes
+
+  # Fallback to local if remote fails
+  fallback_to_local: true
+
+# Transcription settings (sent to server)
+whisper:
+  model: medium
+  device: auto
+  language: en
+
+# Diarization settings (sent to server)
+diarization:
+  enabled: true
+  min_speakers: 2
+  max_speakers: 10
+
+# Summarization (server uses its Ollama)
+summarization:
+  model: "qwen2.5:14b"
+```
+
+**Server `config.yaml`**:
+```yaml
+# Server settings
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+
+# Processing settings
+processing:
+  max_concurrent_jobs: 3
+  job_timeout: 3600
+  cleanup_after_hours: 24
+
+# Storage
+storage:
+  uploads_dir: "/var/meeting-recorder/uploads"
+  results_dir: "/var/meeting-recorder/results"
+  max_upload_size_mb: 500
+
+# Models
+whisper:
+  model: "medium"
+  device: "cuda"
+
+diarization:
+  model: "pyannote/speaker-diarization"
+  device: "cuda"
+
+summarization:
+  endpoint: "http://localhost:11434"
+  model: "qwen2.5:14b"
+```
+
+**Benefits**:
+- ✅ Lightweight client - just records and uploads
+- ✅ Heavy processing on powerful GPU server
+- ✅ Can use GPU-accelerated diarization (fast)
+- ✅ One server serves multiple users/machines
+- ✅ Client works on any machine (no GPU needed)
+- ✅ Parallel processing on server (multiple meetings at once)
+- ✅ Centralized model management and updates
+- ✅ Option to fallback to local processing
+
+**User Experience**:
+1. Record meeting on laptop (no GPU needed)
+2. Press [S] to stop
+3. Audio uploads to firecorn.net server (~5 seconds for 30min meeting)
+4. Dashboard shows: "⏳ Uploading... 80% complete"
+5. Then: "⏳ Processing on server... (estimated 3 minutes)"
+6. Meanwhile: Can start next recording immediately
+7. When complete: "✅ Results downloaded, saved to vault"
+
+**Implementation Phases**:
+
+**Phase 1: Server Setup**
+1. Install FastAPI on firecorn.net
+2. Setup processing worker (Celery/RQ)
+3. Install WhisperX + pyannote.audio
+4. Create API endpoints
+5. Test with curl
+
+**Phase 2: Client Integration**
+1. Create `api_client.py` module
+2. Update `processing_queue.py` for remote mode
+3. Add upload progress tracking
+4. Add polling for results
+5. Handle download and save
+
+**Phase 3: Deployment**
+1. Deploy server with systemd service
+2. Setup nginx reverse proxy
+3. Add SSL certificate
+4. Configure firewall
+5. Test from client
+
+**Security Considerations**:
+- Optional API key authentication
+- SSL/TLS encryption (HTTPS)
+- Rate limiting on uploads
+- File size limits
+- Auto-cleanup of old files
+- Optional: User authentication
+
+**Hybrid Mode** (Best of Both Worlds):
+```yaml
+processing:
+  mode: "hybrid"
+
+  # Try remote first, fallback to local if:
+  # - Server unavailable
+  # - Network too slow
+  # - Queue too long
+  fallback_conditions:
+    max_upload_time: 60  # seconds
+    max_queue_length: 5
+    max_wait_time: 600   # 10 minutes
+```
+
+---
+
+### Option B: Local Processing with AMD GPU (Radeon 780M)
+
+**Your Hardware**: AMD Radeon 780M (RDNA 3 integrated GPU)
+- 12 Compute Units
+- Supports ROCm (AMD's CUDA equivalent)
+- Good for ML inference workloads
+- Lower power consumption than discrete GPUs
+
+**Can it run Whisper + Diarization?**
+
+**YES** - with ROCm support! Here's how:
+
+**Supported Frameworks**:
+
+**1. PyTorch with ROCm** ✅
+- PyTorch has official ROCm support
+- faster-whisper uses PyTorch backend
+- pyannote.audio uses PyTorch
+- Should work with your 780M
+
+**Installation**:
+```bash
+# Install ROCm (on Linux)
+# Check: https://rocm.docs.amd.com/en/latest/deploy/linux/quick_start.html
+
+# Install PyTorch with ROCm
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm5.7
+
+# Install Whisper/faster-whisper
+pip install faster-whisper
+
+# Install WhisperX (includes diarization)
+pip install whisperx
+
+# Verify GPU detection
+python -c "import torch; print(f'GPU Available: {torch.cuda.is_available()}'); print(f'GPU Name: {torch.cuda.get_device_name(0)}')"
+```
+
+**Expected Performance** (estimated):
+- **Whisper transcription**: 2-4x faster than CPU
+- **Diarization (pyannote)**: 3-5x faster than CPU
+- **30-minute meeting**: ~3-5 minutes total processing (vs 10-15 min on CPU)
+
+**Configuration for AMD GPU**:
+```yaml
+# Local processing with AMD GPU
+processing:
+  mode: "local"
+
+whisper:
+  model: "medium"  # or "large-v2" if enough VRAM
+  device: "cuda"   # ROCm uses same API as CUDA
+  compute_type: "float16"  # Use FP16 for faster processing
+
+diarization:
+  enabled: true
+  device: "cuda"
+  min_speakers: 2
+  max_speakers: 10
+```
+
+**Memory Considerations** (780M integrated GPU):
+- Shares system RAM
+- Whisper medium: ~5GB VRAM
+- Diarization: ~2GB VRAM
+- **Total needed**: ~7-8GB for both
+- Should fit if you have 16GB+ system RAM
+
+**Testing AMD GPU Support**:
+```bash
+# 1. Check if ROCm detects your GPU
+rocm-smi
+
+# 2. Test PyTorch CUDA availability
+python3 -c "import torch; print(torch.cuda.is_available())"
+
+# 3. Test Whisper on GPU
+python3 << EOF
+from faster_whisper import WhisperModel
+model = WhisperModel("base", device="cuda", compute_type="float16")
+print("Whisper GPU test: OK")
+EOF
+
+# 4. Test pyannote
+python3 << EOF
+import torch
+from pyannote.audio import Pipeline
+pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
+pipeline.to(torch.device("cuda"))
+print("Diarization GPU test: OK")
+EOF
+```
+
+**Pros of Local AMD GPU**:
+- ✅ No network upload needed
+- ✅ Privacy - all processing local
+- ✅ Works offline
+- ✅ Lower latency (no upload/download)
+- ✅ 2-4x faster than CPU
+- ✅ No server maintenance
+
+**Cons**:
+- ⚠️ ROCm setup can be tricky
+- ⚠️ Not as fast as server NVIDIA GPU
+- ⚠️ Shares system RAM (integrated GPU)
+- ⚠️ Some models may not be optimized for AMD
+
+**Recommended Approach** (v0.4):
+
+**Hybrid Configuration**:
+```yaml
+processing:
+  mode: "hybrid"
+
+  # Try local AMD GPU first
+  local:
+    device: "cuda"  # ROCm
+    fallback_to_cpu: true
+
+  # If local too slow, use remote
+  remote:
+    enabled: true
+    server_url: "https://ollama.firecorn.net:8000"
+    conditions:
+      # Use remote if local takes > 10 minutes
+      max_local_time: 600
+```
+
+**Decision Tree**:
+```
+Recording stopped
+    ↓
+Check AMD GPU available?
+    ├─ Yes → Process locally with GPU
+    │        (estimated: 3-5 min for 30min recording)
+    │        ↓
+    │   Success? → Save to vault
+    │        ↓
+    │    Timeout/Error? → Fallback to remote server
+    │
+    └─ No → Use remote server
+           (already configured)
+```
+
+**Implementation Plan**:
+
+**Phase 1: Test AMD GPU Setup**
+1. Install ROCm on your system
+2. Install PyTorch with ROCm support
+3. Test Whisper on GPU
+4. Test diarization on GPU
+5. Benchmark performance
+
+**Phase 2: Add AMD GPU Support to Code**
+```python
+# In transcribe.py
+class Transcriber:
+    def __init__(self, device="auto"):
+        # Auto-detect: ROCm > CUDA > CPU
+        if device == "auto":
+            device = self._detect_device()
+
+    def _detect_device(self):
+        import torch
+        if torch.cuda.is_available():
+            # Works for both CUDA and ROCm
+            return "cuda"
+        return "cpu"
+```
+
+**Phase 3: Benchmark & Decide**
+- Run test meeting (10-30 minutes)
+- Measure processing time on AMD GPU
+- Compare to server processing time
+- Decide: Local AMD GPU or Remote Server?
+
+**Estimated Performance Comparison**:
+
+| Processing | AMD 780M (Local) | NVIDIA 2000 ADA (Server) |
+|------------|------------------|--------------------------|
+| 30min transcription | ~2-3 min | ~1-2 min |
+| Diarization | ~1-2 min | ~30-60 sec |
+| Summarization | ~30 sec | ~30 sec |
+| **Total** | **~3.5-5.5 min** | **~2-3 min** |
+| Network upload | 0 sec | ~5-10 sec |
+| Network download | 0 sec | ~2-3 sec |
+| **End-to-End** | **~3.5-5.5 min** | **~2.5-3.5 min** |
+
+**Recommendation**:
+- Start with **local AMD GPU processing** (simpler, no server needed)
+- If performance is acceptable (< 5 min for 30min recording), stick with it
+- Keep **remote server option** for:
+  - Very long recordings (> 1 hour)
+  - When laptop is underpowered
+  - When you want fastest possible processing
+
+**Best of Both Worlds**:
+- Use AMD 780M for regular meetings (most cases)
+- Use server for special cases (very long recordings, multiple simultaneous jobs)
+- Automatic fallback if AMD GPU fails
+
+---
+
+### Option C: Local Speaker Detection and Diarization (CPU-only)
+
+**Goal**: Identify and label different speakers in meeting recordings (CPU only).
 
 **Use Cases**:
 - Distinguish between the user (microphone audio) and other participants (speaker audio)

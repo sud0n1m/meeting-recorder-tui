@@ -975,9 +975,147 @@ whisper:
 
 ---
 
-## Version 0.4 - Planned Features
+## Version 0.4 - Client-Server with Hybrid Processing (COMPLETED)
 
-### Option A: Client-Server Architecture with Remote Processing (Recommended)
+**Status**: ✅ Implemented - Server-first with local fallback
+
+**Goal**: Balanced approach that tries remote server first, automatically falls back to local processing
+
+### Implementation Summary
+
+**Architecture: Server-First with Graceful Fallback**
+
+The v0.4 implementation provides three processing modes:
+
+1. **`hybrid` (RECOMMENDED)** - Try server first, fallback to local
+   - Check server health before processing
+   - Upload audio to server if available
+   - Automatically fallback to local if server fails
+   - Best user experience: fast when available, reliable always
+
+2. **`remote`** - Remote server only
+   - Fail if server unavailable (no fallback)
+   - Guaranteed GPU processing
+   - Use when you always want server-side processing
+
+3. **`local`** - Local processing only
+   - Never contact server
+   - Use for offline work or privacy concerns
+
+**Configuration**:
+```yaml
+processing:
+  mode: "hybrid"  # Options: local, remote, hybrid
+
+  server:
+    enabled: true
+    url: "https://firecorn.net:8000"
+    api_key: ""
+    timeout: 300  # 5 minutes
+    health_check_timeout: 5  # 5 seconds
+```
+
+**Files Created/Modified**:
+- [config.yaml](config.yaml) - Added processing mode configuration
+- [config.yaml.example](config.yaml.example) - Documented processing modes
+- [src/config.py](src/config.py) - Added processing mode properties
+- [src/server_client.py](src/server_client.py) - **NEW**: Server API client with health checks
+- [src/processing_queue.py](src/processing_queue.py) - Updated with hybrid processing logic
+- [src/tui.py](src/tui.py) - Shows processing mode in dashboard
+
+**Key Features**:
+
+1. **Server Health Check** (`ServerClient.check_health()`)
+   - Fast 5-second timeout
+   - Checks `/health` endpoint before processing
+   - Returns AVAILABLE, UNAVAILABLE, or ERROR status
+
+2. **Intelligent Fallback Logic** (`ProcessingQueue._process_job()`)
+   ```python
+   if mode in ["hybrid", "remote"] and server_enabled:
+       if try_server_processing():
+           return  # Success!
+       elif mode == "remote":
+           raise Exception("Server failed, no fallback")
+       else:
+           # Hybrid: fall back to local
+           process_locally()
+   else:
+       # Local mode
+       process_locally()
+   ```
+
+3. **Server Processing** (`ServerClient.process_recording()`)
+   - Upload audio file via multipart form
+   - Pass model configuration (whisper_model, ollama_model)
+   - Receive transcript and summary in response
+   - Save results locally
+
+4. **Local Processing Preservation**
+   - Original local processing code moved to `_process_locally()`
+   - No changes to local transcription/summarization
+   - Backwards compatible with v0.3.5
+
+**User Experience**:
+
+Dashboard now shows processing mode:
+```
+🎙️  Ready to Record
+
+Configuration:
+  • Whisper: base (auto)
+  • Processing: hybrid (server→local)
+  • Output: /path/to/vault/meetings
+  • LLM: qwen3:8b-q8_0
+```
+
+During processing, user sees:
+- "Trying remote server processing..." (if hybrid/remote)
+- "Server processing completed in X.Xs" (on success)
+- "⚠️  Server processing failed, falling back to local processing..." (if hybrid)
+- "Processing locally..." (if local mode or fallback)
+
+**Performance Expectations**:
+
+| Scenario | Expected Time (30-min meeting) |
+|----------|-------------------------------|
+| Server available (NVIDIA GPU) | ~2-3 minutes |
+| Fallback to local (AMD 780M) | ~3-5 minutes |
+| Local CPU (int8) | ~3-5 minutes |
+| Server timeout | 5 sec health check + local processing |
+
+**Benefits**:
+- ✅ Transparent server usage (try server automatically)
+- ✅ Reliability (always works even if server down)
+- ✅ Fast processing when server available
+- ✅ No user intervention required for fallback
+- ✅ Privacy control (can disable server)
+- ✅ Works offline (automatic fallback)
+
+**Next Steps** (Server Implementation):
+
+The client is ready. To complete v0.4, implement the FastAPI server:
+
+1. **Server Endpoints**:
+   - `GET /health` - Health check endpoint
+   - `POST /api/process` - Process recording with multipart audio upload
+
+2. **Server Implementation** (TODO):
+   - FastAPI REST API
+   - GPU-accelerated Whisper transcription
+   - Ollama integration for summarization
+   - Return JSON with transcript and summary
+
+3. **Deployment** (TODO):
+   - Deploy to firecorn.net:8000
+   - Configure HTTPS with SSL certificate
+   - Set up GPU drivers (CUDA for NVIDIA RTX 2000 ADA)
+
+---
+
+## Version 0.4 - Server Implementation (TODO)
+
+### Option A: Client-Server Architecture with Remote Processing
 
 **Goal**: Separate frontend (recording) from backend (processing) to enable:
 - Offload heavy processing to powerful server

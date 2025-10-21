@@ -100,6 +100,36 @@ class Config:
         """Get timestamp format string."""
         return self.get("output.timestamp_format", "%Y-%m-%d_%H-%M-%S")
 
+    @property
+    def processing_mode(self) -> str:
+        """Get processing mode (local, remote, hybrid)."""
+        return self.get("processing.mode", "local")
+
+    @property
+    def server_enabled(self) -> bool:
+        """Check if server processing is enabled."""
+        return self.get("processing.server.enabled", False)
+
+    @property
+    def server_url(self) -> str:
+        """Get server URL."""
+        return self.get("processing.server.url", "")
+
+    @property
+    def server_api_key(self) -> str:
+        """Get server API key."""
+        return self.get("processing.server.api_key", "")
+
+    @property
+    def server_timeout(self) -> int:
+        """Get server processing timeout in seconds."""
+        return self.get("processing.server.timeout", 300)
+
+    @property
+    def server_health_check_timeout(self) -> int:
+        """Get server health check timeout in seconds."""
+        return self.get("processing.server.health_check_timeout", 5)
+
 
 def main():
     """Test config loading."""

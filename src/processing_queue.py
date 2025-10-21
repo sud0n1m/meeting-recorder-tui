@@ -17,6 +17,7 @@ from transcribe import Transcriber
 from summarize import Summarizer
 from markdown_writer import MarkdownWriter
 from config import Config
+from server_client import ServerClient, ServerStatus
 
 
 class JobStatus(Enum):
@@ -193,7 +194,103 @@ class ProcessingQueue:
 
     def _process_job(self, job: ProcessingJob) -> None:
         """
-        Process a single recording job.
+        Process a single recording job with server-first, local fallback strategy.
+
+        Args:
+            job: ProcessingJob to process
+        """
+        processing_mode = self.config.processing_mode
+        used_server = False
+
+        # Try server processing first (if hybrid or remote mode)
+        if processing_mode in ["hybrid", "remote"] and self.config.server_enabled:
+            try:
+                print(f"\n{'='*60}")
+                print(f"Trying remote server processing...")
+                print(f"{'='*60}")
+
+                server_result = self._try_server_processing(job)
+
+                if server_result:
+                    print(f"✓ Server processing successful!")
+                    used_server = True
+                    return  # Success! Job completed on server
+
+                elif processing_mode == "remote":
+                    # Remote-only mode: fail if server doesn't work
+                    raise Exception("Server processing failed and mode is 'remote' (no local fallback)")
+
+                else:
+                    # Hybrid mode: fall back to local
+                    print(f"⚠️  Server processing failed, falling back to local processing...")
+
+            except Exception as e:
+                if processing_mode == "remote":
+                    raise  # Re-raise in remote-only mode
+                print(f"⚠️  Server error: {e}")
+                print(f"Falling back to local processing...")
+
+        # Local processing (either mode=local, or fallback from hybrid)
+        if not used_server:
+            print(f"\n{'='*60}")
+            print(f"Processing locally...")
+            print(f"{'='*60}")
+            self._process_locally(job)
+
+    def _try_server_processing(self, job: ProcessingJob) -> bool:
+        """
+        Try to process job on remote server.
+
+        Args:
+            job: ProcessingJob to process
+
+        Returns:
+            True if successful, False otherwise
+        """
+        # Create server client
+        client = ServerClient(
+            server_url=self.config.server_url,
+            api_key=self.config.server_api_key,
+            timeout=self.config.server_timeout,
+            health_check_timeout=self.config.server_health_check_timeout
+        )
+
+        try:
+            # Check server health
+            print("Checking server availability...")
+            status = client.check_health()
+
+            if status != ServerStatus.AVAILABLE:
+                print(f"Server not available: {status.value}")
+                return False
+
+            print("Server is available, uploading audio...")
+
+            # Process on server
+            result = client.process_recording(
+                audio_file=job.audio_file,
+                title=job.title,
+                whisper_model=job.whisper_model,
+                ollama_model=job.ollama_model
+            )
+
+            if not result.success:
+                print(f"Server processing failed: {result.error_message}")
+                return False
+
+            print(f"Server processing completed in {result.processing_time:.1f}s")
+
+            # Save results locally
+            self._save_server_results(job, result.transcript_text, result.summary_text)
+
+            return True
+
+        finally:
+            client.close()
+
+    def _process_locally(self, job: ProcessingJob) -> None:
+        """
+        Process job locally (original implementation).
 
         Args:
             job: ProcessingJob to process
@@ -231,6 +328,33 @@ class ProcessingQueue:
         markdown_writer.write_meeting(
             transcript_path=transcriber.transcript_file,
             summary_path=summary_path,
+            audio_path=job.audio_file if job.keep_audio else None,
+            timestamp=job.timestamp,
+            title=job.title
+        )
+
+    def _save_server_results(self, job: ProcessingJob, transcript: str, summary: str) -> None:
+        """
+        Save results from server processing to local files.
+
+        Args:
+            job: ProcessingJob being processed
+            transcript: Transcript text from server
+            summary: Summary text from server
+        """
+        # Create transcript file
+        transcript_file = job.audio_file.parent / f"transcript_{job.timestamp.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+        transcript_file.write_text(transcript)
+
+        # Create summary file
+        summary_file = job.audio_file.parent / f"summary_{job.timestamp.strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+        summary_file.write_text(summary)
+
+        # Save to markdown
+        markdown_writer = MarkdownWriter(output_dir=job.meetings_dir)
+        markdown_writer.write_meeting(
+            transcript_path=transcript_file,
+            summary_path=summary_file,
             audio_path=job.audio_file if job.keep_audio else None,
             timestamp=job.timestamp,
             title=job.title

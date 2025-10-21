@@ -11,6 +11,20 @@ audio:
   format: s16le
   channels: 1
 
+# Processing mode (v0.4)
+processing:
+  mode: "hybrid"  # Options: local, remote, hybrid
+  # hybrid: Try remote server first, fallback to local on failure
+  # remote: Remote only (fail if server unavailable)
+  # local: Local only (never use server)
+
+  server:
+    enabled: true
+    url: "https://firecorn.net:8000"  # Your processing server
+    api_key: ""  # Optional API key for authentication
+    timeout: 300  # Timeout in seconds for processing (5 min)
+    health_check_timeout: 5  # Timeout for server health check (5 sec)
+
 # Transcription settings
 whisper:
   model: base  # Options: tiny, base, small, medium, large

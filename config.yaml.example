@@ -12,6 +12,20 @@ audio:
   format: s16le       # 16-bit PCM signed little-endian
   channels: 1         # Mono (mic + speakers mixed)
 
+# Processing mode (v0.4) - Server-first with local fallback
+processing:
+  mode: "hybrid"  # Options: local, remote, hybrid (recommended)
+  # hybrid: Try remote server first, automatically fallback to local if server unavailable
+  # remote: Remote only (fail if server unavailable - use for guaranteed GPU processing)
+  # local: Local only (never contact server - use for offline/privacy)
+
+  server:
+    enabled: true
+    url: "https://your-server.com:8000"  # Your processing server URL
+    api_key: ""  # Optional API key for authentication
+    timeout: 300  # Max processing time in seconds (5 min default)
+    health_check_timeout: 5  # Server availability check timeout (5 sec)
+
 # Transcription settings
 whisper:
   model: base       # Options: tiny, base, small, medium, large

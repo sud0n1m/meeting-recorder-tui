@@ -119,10 +119,18 @@ class MeetingRecorderApp(App):
             elif status["completed"] > 0:
                 queue_status = f"\n  ✅ {status['completed']} recordings saved"
 
+        # Processing mode indicator
+        mode_display = self.config.processing_mode
+        if mode_display == "hybrid":
+            mode_display = "hybrid (server→local)"
+        elif mode_display == "remote":
+            mode_display = "remote only"
+
         dashboard = f"""🎙️  Ready to Record
 
 Configuration:
   • Whisper: {self.config.whisper_model} ({self.config.whisper_device})
+  • Processing: {mode_display}
   • Output: {self.config.meetings_dir}
   • LLM: {self.config.ollama_model}{queue_status}
 

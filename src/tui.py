@@ -382,8 +382,74 @@ Press [S] to Stop & Save  |  [C] to Cancel  |  [T] to Edit Title"""
             self.is_editing_title = False
             self.show_recording_screen()
 
+    def action_quit_app(self) -> None:
+        """Quit application with safety checks."""
+        # Check for recording in progress
+        if self.state == AppState.RECORDING:
+            # Cancel recording first
+            self.action_cancel_recording()
+            return  # Don't exit yet, let user decide after canceling
+
+        # Check for jobs in processing queue
+        if self.processing_queue:
+            status = self.processing_queue.get_status()
+            active_jobs = status["processing"] + status["pending"]
+
+            if active_jobs > 0:
+                # Show warning about jobs in progress
+                content = self.query_one("#main-content", Static)
+                content.update(f"""⚠️  Warning: Processing in Progress
+
+{status['processing']} job(s) currently processing
+{status['pending']} job(s) pending
+
+Options:
+  [W] Wait for completion (recommended)
+  [F] Force quit (will lose progress)
+  [Esc] Cancel and return
+
+Press your choice...""")
+
+                # Store that we're in quit confirmation mode
+                self._quit_confirmation = True
+                return
+
+        # No jobs in progress, safe to exit
+        self._shutdown_and_exit()
+
+    def _shutdown_and_exit(self) -> None:
+        """Shutdown processing queue and exit."""
+        if self.processing_queue:
+            print("Shutting down processing queue...")
+            self.processing_queue.stop(wait=False)
+        self.exit()
+
     def on_key(self, event) -> None:
-        """Handle key presses for title editing."""
+        """Handle key presses for title editing and quit confirmation."""
+        # Handle quit confirmation
+        if hasattr(self, '_quit_confirmation') and self._quit_confirmation:
+            if event.key == "w":
+                content = self.query_one("#main-content", Static)
+                content.update("⏳ Waiting for jobs to complete...\n\nPress [Ctrl+C] to force quit")
+                self._quit_confirmation = False
+                # Wait for queue to finish
+                if self.processing_queue:
+                    self.processing_queue.stop(wait=True)
+                self.exit()
+                event.prevent_default()
+                return
+            elif event.key == "f":
+                self._quit_confirmation = False
+                self._shutdown_and_exit()
+                event.prevent_default()
+                return
+            elif event.key == "escape":
+                self._quit_confirmation = False
+                self.show_dashboard()
+                event.prevent_default()
+                return
+
+        # Handle title editing
         if self.is_editing_title and self.state == AppState.RECORDING:
             if event.character and event.character.isprintable():
                 self.meeting_title += event.character
@@ -393,13 +459,6 @@ Press [S] to Stop & Save  |  [C] to Cancel  |  [T] to Edit Title"""
                 self.meeting_title = self.meeting_title[:-1] if self.meeting_title else ""
                 self.show_recording_screen()
                 event.prevent_default()
-
-    def action_quit_app(self) -> None:
-        """Quit application."""
-        if self.state == AppState.RECORDING:
-            # Cancel recording first
-            self.action_cancel_recording()
-        self.exit()
 
 
 def run_tui():

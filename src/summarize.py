@@ -91,29 +91,30 @@ class Summarizer:
 
     def _build_prompt(self, transcript: str) -> str:
         """Build structured prompt for summarization."""
-        return f"""You are a meeting minutes assistant. Read the following meeting transcript and create a structured summary.
+        return f"""You are a meeting minutes assistant. Read the following meeting transcript and create a comprehensive structured summary.
 
 TRANSCRIPT:
 {transcript}
 
-Based on this transcript, provide a structured summary using EXACTLY this format:
+Based on this transcript, provide a detailed structured summary using EXACTLY this format:
 
 ## Summary
-[2-3 sentences providing a high-level overview of the meeting]
+[Write a comprehensive overview of the meeting in 1-2 paragraphs. Include the main purpose, key themes discussed, overall outcome, and important context. Be thorough and capture the essence of the conversation.]
 
 ## Key Discussion Points
-- [Main topic discussed]
-- [Another key point]
-- [Additional points as needed]
+- [Main topic discussed with relevant details]
+- [Another key point with context]
+- [Additional points as needed - include 5-10 points for thorough coverage]
+- [For each point, explain what was discussed and why it matters]
 
 ## Decisions Made
-- [Decision 1]
-- [Decision 2]
+- [Decision 1 with rationale if discussed]
+- [Decision 2 with context]
 - [List all firm decisions, or write "No explicit decisions made"]
 
 ## Action Items
 - [ ] [Who] - [What to do] - [When/deadline if mentioned]
-- [ ] [Another action item]
+- [ ] [Another action item with full context]
 - [List all action items, or write "No action items identified"]
 
 ## Open Questions
@@ -121,7 +122,7 @@ Based on this transcript, provide a structured summary using EXACTLY this format
 - [Another open question]
 - [List unresolved items, or write "No open questions"]
 
-Be concise, factual, and use bullet points. Do not add information not present in the transcript."""
+IMPORTANT: Be thorough and detailed in the Summary and Key Discussion Points sections. Capture nuances, concerns raised, alternatives discussed, and reasoning provided. The summary should give someone who wasn't in the meeting a complete understanding of what happened."""
 
     def summarize_file(self, transcript_path: Path, output_path: Optional[Path] = None) -> Path:
         """

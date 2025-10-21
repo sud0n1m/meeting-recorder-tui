@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-Complete TUI for meeting recorder with full workflow integration.
+Meeting Recorder TUI - Version 0.2 (Simplified)
+Multi-screen workflow with improved UX.
 """
 
 import time
+import re
+from enum import Enum
 from datetime import datetime, timedelta
 from typing import Optional
 from pathlib import Path
 from textual.app import App, ComposeResult
-from textual.containers import Container
-from textual.widgets import Static
+from textual.containers import Container, Vertical, Horizontal
+from textual.widgets import Static, Input, Footer, Header
 from textual.reactive import reactive
 from textual.worker import Worker, WorkerState
+from textual.binding import Binding
 
 from audio_setup import AudioCaptureSetup
 from audio_monitor import AudioLevelMonitor
@@ -21,264 +25,375 @@ from markdown_writer import MarkdownWriter
 from config import Config
 
 
-class RecordingTimer(Static):
-    """Widget to display recording timer."""
-
-    elapsed_seconds = reactive(0)
-
-    def on_mount(self) -> None:
-        """Start the timer when widget is mounted."""
-        self.start_time = time.time()
-        self.update_timer = self.set_interval(1, self.tick)
-
-    def tick(self) -> None:
-        """Update the elapsed time."""
-        self.elapsed_seconds = int(time.time() - self.start_time)
-
-    def watch_elapsed_seconds(self, elapsed: int) -> None:
-        """Update the display when elapsed time changes."""
-        td = timedelta(seconds=elapsed)
-        hours = td.seconds // 3600
-        minutes = (td.seconds % 3600) // 60
-        seconds = td.seconds % 60
-        self.update(f"🎙️  Recording: {hours:02d}:{minutes:02d}:{seconds:02d}")
-
-
-class AudioLevelMeter(Static):
-    """Widget to display audio level with label and bar."""
-
-    level = reactive(0.0)
-
-    def __init__(self, label: str, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.label = label
-
-    def watch_level(self, level: float) -> None:
-        """Update the display when level changes."""
-        # Create visual bar with blocks
-        bar_width = 20
-        filled = int(level * bar_width)
-        bar = "▓" * filled + "░" * (bar_width - filled)
-        percentage = int(level * 100)
-        self.update(f"{self.label:12} {bar}  [{percentage:3d}%]")
-
-
-class StatusMessage(Static):
-    """Widget to display current status message."""
-
-    status = reactive("")
-
-    def watch_status(self, status: str) -> None:
-        """Update status display."""
-        self.update(status)
+class AppState(Enum):
+    """Application state machine."""
+    READY = "ready"
+    RECORDING = "recording"
+    PROCESSING = "processing"
 
 
 class MeetingRecorderApp(App):
-    """Complete meeting recorder with transcription and summarization."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.config = Config()
-        self.audio_setup: Optional[AudioCaptureSetup] = None
-        self.audio_monitor: Optional[AudioLevelMonitor] = None
-        self.transcriber: Optional[Transcriber] = None
-        self.summarizer: Optional[Summarizer] = None
-        self.markdown_writer: Optional[MarkdownWriter] = None
-        self.recording_timestamp: Optional[datetime] = None
+    """Meeting recorder with 3-screen workflow."""
 
     CSS = """
     Screen {
         align: center middle;
     }
 
-    #main-container {
-        width: 60;
+    #content {
+        width: 70;
         height: auto;
         border: heavy $accent;
-        padding: 1 2;
+        padding: 2;
     }
 
-    RecordingTimer {
+    .center {
         text-align: center;
-        width: 100%;
-        margin: 1 0;
+    }
+
+    .bold {
         text-style: bold;
     }
 
-    AudioLevelMeter {
-        width: 100%;
-        margin: 0 0;
-    }
-
-    .levels-container {
-        margin: 1 0;
-    }
-
-    .instruction {
-        text-align: center;
+    .muted {
         color: $text-muted;
-        margin-top: 1;
-    }
-
-    StatusMessage {
-        text-align: center;
-        width: 100%;
-        margin: 1 0;
-        color: $success;
     }
     """
 
     BINDINGS = [
-        ("q", "quit", "Quit"),
+        Binding("r", "start_recording", "[R]ecord", key_display="r"),
+        Binding("enter", "context_enter", "Enter", show=False),
+        Binding("s", "stop_and_save", "[S]top&Save", key_display="s"),
+        Binding("c", "cancel_recording", "[C]ancel", key_display="c"),
+        Binding("t", "edit_title", "[T]itle", key_display="t"),
+        Binding("escape", "cancel_title_edit", "Esc", show=False),
+        Binding("q", "quit_app", "[Q]uit", key_display="q"),
     ]
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.config = Config()
+        self.state = AppState.READY
+        self.meeting_title = "Untitled"
+        self.recording_timestamp: Optional[datetime] = None
+        self.audio_setup: Optional[AudioCaptureSetup] = None
+        self.audio_monitor: Optional[AudioLevelMonitor] = None
+        self.transcriber: Optional[Transcriber] = None
+        self.title_input: Optional[Input] = None
+        self.is_editing_title: bool = False
+
     def compose(self) -> ComposeResult:
-        """Create child widgets for the app."""
-        with Container(id="main-container"):
-            yield Static("Meeting Recorder", classes="title")
-            yield RecordingTimer()
-            with Container(classes="levels-container"):
-                yield AudioLevelMeter("Microphone:", id="mic-level")
-                yield AudioLevelMeter("Speakers:", id="speaker-level")
-            yield StatusMessage(id="status")
-            yield Static("Press 'q' or Ctrl+C to stop recording", classes="instruction")
+        """Create UI."""
+        yield Header()
+        with Container(id="content"):
+            yield Static("", id="main-content")
+        yield Footer()
 
     def on_mount(self) -> None:
-        """Called when app is mounted."""
-        self.title = "Meeting Recorder"
-        self.sub_title = "TUI Mode"
+        """Initialize app."""
+        self.title = "Meeting Recorder v0.2"
+        self.show_dashboard()
+
+    def show_dashboard(self) -> None:
+        """Show pre-recording dashboard."""
+        self.state = AppState.READY
+        content = self.query_one("#main-content", Static)
+
+        dashboard = f"""🎙️  Ready to Record
+
+Configuration:
+  • Whisper: {self.config.whisper_model} ({self.config.whisper_device})
+  • Output: {self.config.meetings_dir}
+  • LLM: {self.config.ollama_model}
+
+Press [R] or [Enter] to Start Recording
+Press [Q] to Quit"""
+
+        content.update(dashboard)
+
+    def action_start_recording(self) -> None:
+        """Start recording."""
+        if self.state != AppState.READY:
+            return
+
         self.recording_timestamp = datetime.now()
+        self.state = AppState.RECORDING
 
-        # Update status
-        self.update_status("Initializing audio...")
+        # Initialize audio
+        content = self.query_one("#main-content", Static)
+        content.update("🔄 Initializing audio...")
 
-        # Setup audio capture
-        self.audio_setup = AudioCaptureSetup()
-        if not self.audio_setup.setup():
-            self.exit(message="Failed to setup audio capture")
-            return
-
-        # Start audio monitoring
-        self.audio_monitor = AudioLevelMonitor(
-            self.audio_setup.mic_source,
-            self.audio_setup.speaker_source
-        )
-        self.audio_monitor.start()
-
-        # Initialize transcriber
-        self.transcriber = Transcriber(
-            model_size=self.config.whisper_model,
-            device=self.config.whisper_device,
-            output_dir=Path("./recordings")
-        )
-
-        # Initialize summarizer
-        self.summarizer = Summarizer(
-            model=self.config.ollama_model,
-            endpoint=self.config.ollama_endpoint
-        )
-
-        # Initialize markdown writer
-        self.markdown_writer = MarkdownWriter(
-            output_dir=self.config.meetings_dir
-        )
-
-        # Start recording
-        monitor_source = self.audio_setup.get_monitor_source()
-        if not self.transcriber.start_recording(monitor_source):
-            self.exit(message="Failed to start recording")
-            return
-
-        # Update UI with audio levels
-        self.set_interval(0.1, self.update_levels)
-        self.update_status("🎙️  Recording...")
-
-    def update_levels(self) -> None:
-        """Update audio level meters with real PipeWire data."""
-        if not self.audio_monitor:
-            return
-
-        mic_level, speaker_level = self.audio_monitor.get_levels()
-        mic_meter = self.query_one("#mic-level", AudioLevelMeter)
-        speaker_meter = self.query_one("#speaker-level", AudioLevelMeter)
-        mic_meter.level = mic_level
-        speaker_meter.level = speaker_level
-
-    def update_status(self, message: str) -> None:
-        """Update status message."""
         try:
-            status_widget = self.query_one("#status", StatusMessage)
-            status_widget.status = message
-        except:
-            pass  # Widget not yet mounted
+            # Setup audio capture
+            self.audio_setup = AudioCaptureSetup()
+            if not self.audio_setup.setup():
+                content.update("❌ Failed to setup audio")
+                time.sleep(2)
+                self.show_dashboard()
+                return
 
-    def action_quit(self) -> None:
-        """Handle quit action - process recording before exiting."""
-        # Start processing in background worker
+            # Initialize transcriber
+            self.transcriber = Transcriber(
+                model_size=self.config.whisper_model,
+                device=self.config.whisper_device,
+                output_dir=Path("./recordings")
+            )
+
+            # Start recording
+            monitor_source = self.audio_setup.get_monitor_source()
+            if not self.transcriber.start_recording(monitor_source):
+                content.update("❌ Failed to start recording")
+                time.sleep(2)
+                self.show_dashboard()
+                return
+
+            # Start audio monitoring
+            self.audio_monitor = AudioLevelMonitor(
+                self.audio_setup.mic_source,
+                self.audio_setup.speaker_source
+            )
+            self.audio_monitor.start()
+
+            # Show recording screen
+            self.show_recording_screen()
+            self.set_interval(1, self.update_recording_display)
+
+        except Exception as e:
+            content.update(f"❌ Error: {str(e)}")
+            time.sleep(2)
+            self.show_dashboard()
+
+    def show_recording_screen(self) -> None:
+        """Show recording screen."""
+        content = self.query_one("#main-content", Static)
+        elapsed = self._get_elapsed_time()
+
+        # Get audio levels
+        mic_level = 0.0
+        speaker_level = 0.0
+        if self.audio_monitor:
+            mic_level, speaker_level = self.audio_monitor.get_levels()
+
+        # Create audio level bars
+        mic_bar = self._create_level_bar(mic_level)
+        speaker_bar = self._create_level_bar(speaker_level)
+
+        title_display = f"Meeting: {self.meeting_title}"
+        if self.is_editing_title:
+            title_display = f"Meeting: > {self.meeting_title}_ (editing - press Enter to save)"
+
+        recording_display = f"""🔴 RECORDING: {elapsed}
+
+{title_display}
+Started: {self.recording_timestamp.strftime("%Y-%m-%d %H:%M") if self.recording_timestamp else ""}
+
+Audio Levels:
+  Microphone:  {mic_bar}  [{int(mic_level * 100):3d}%]
+  Speakers:    {speaker_bar}  [{int(speaker_level * 100):3d}%]
+
+Press [S] to Stop & Save  |  [C] to Cancel  |  [T] to Edit Title"""
+
+        content.update(recording_display)
+
+    def _create_level_bar(self, level: float) -> str:
+        """Create a visual level bar."""
+        bar_width = 20
+        filled = int(level * bar_width)
+        return "▓" * filled + "░" * (bar_width - filled)
+
+    def _get_elapsed_time(self) -> str:
+        """Get formatted elapsed time."""
+        if not self.recording_timestamp:
+            return "00:00:00"
+
+        elapsed = int((datetime.now() - self.recording_timestamp).total_seconds())
+        hours = elapsed // 3600
+        minutes = (elapsed % 3600) // 60
+        seconds = elapsed % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    def update_recording_display(self) -> None:
+        """Update recording display with current time."""
+        if self.state == AppState.RECORDING:
+            self.show_recording_screen()
+
+    def action_stop_and_save(self) -> None:
+        """Stop recording and save."""
+        if self.state != AppState.RECORDING:
+            return
+
+        self.state = AppState.PROCESSING
+        content = self.query_one("#main-content", Static)
+        content.update("⏹️  Stopping recording...\nPlease wait...")
+
+        # Stop the update interval
+        for timer in self._timers:
+            timer.stop()
+
+        # Process in background
         self.run_worker(self.process_recording, exclusive=True, thread=True)
 
-    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        """Handle worker state changes."""
-        if event.state == WorkerState.SUCCESS:
-            # Processing complete, exit
-            time.sleep(2)  # Show final status for 2 seconds
-            self.exit()
-        elif event.state == WorkerState.ERROR:
-            self.update_status(f"❌ Error during processing")
-            time.sleep(2)
-            self.exit()
+    def action_cancel_recording(self) -> None:
+        """Cancel recording without saving."""
+        if self.state != AppState.RECORDING:
+            return
 
-    def on_unmount(self) -> None:
-        """Cleanup when app closes."""
+        content = self.query_one("#main-content", Static)
+        content.update("❌ Cancelling recording...")
+
+        # Stop recording
+        if self.transcriber:
+            self.transcriber.stop_recording()
+
+        # Cleanup audio
         if self.audio_monitor:
             self.audio_monitor.stop()
         if self.audio_setup:
             self.audio_setup.cleanup()
 
+        # Delete audio file if exists
+        if self.transcriber and self.transcriber.audio_file and self.transcriber.audio_file.exists():
+            try:
+                self.transcriber.audio_file.unlink()
+            except:
+                pass
+
+        time.sleep(1)
+        self.show_dashboard()
+
     def process_recording(self) -> None:
-        """Process the recording: transcribe, summarize, and save."""
+        """Process the recording: transcribe, summarize, save."""
+        content = self.query_one("#main-content", Static)
+
         try:
             # Stop recording
-            self.update_status("⏹️  Stopping recording...")
+            content.update("⏹️  Stopping recording...")
             if self.transcriber:
                 self.transcriber.stop_recording()
-                time.sleep(1)  # Wait for file to be written
+                time.sleep(1)
 
-            # Load Whisper model if not already loaded
+            # Cleanup audio
+            if self.audio_monitor:
+                self.audio_monitor.stop()
+            if self.audio_setup:
+                self.audio_setup.cleanup()
+
+            # Load Whisper model
+            content.update("📥 Loading transcription model...")
             if not self.transcriber.model:
-                self.update_status("📥 Loading transcription model...")
                 self.transcriber.load_model()
 
             # Transcribe
             if self.transcriber.audio_file and self.transcriber.audio_file.exists():
-                self.update_status("📝 Transcribing audio...")
+                content.update("📝 Transcribing audio...\nThis may take a few minutes...")
                 self.transcriber.transcribe_audio(self.transcriber.audio_file)
 
                 # Summarize
                 if self.transcriber.transcript_file and self.transcriber.transcript_file.exists():
-                    self.update_status("🤖 Generating summary...")
-                    summary_path = self.summarizer.summarize_file(
+                    content.update("🤖 Generating summary...")
+
+                    # Initialize summarizer
+                    summarizer = Summarizer(
+                        model=self.config.ollama_model,
+                        endpoint=self.config.ollama_endpoint
+                    )
+                    markdown_writer = MarkdownWriter(
+                        output_dir=self.config.meetings_dir
+                    )
+
+                    summary_path = summarizer.summarize_file(
                         self.transcriber.transcript_file
                     )
 
-                    # Save to markdown
-                    self.update_status("💾 Saving to vault...")
-                    result = self.markdown_writer.write_meeting(
+                    # Save to markdown with sanitized title
+                    content.update("💾 Saving to vault...")
+                    sanitized_title = self._sanitize_title(self.meeting_title)
+                    result = markdown_writer.write_meeting(
                         transcript_path=self.transcriber.transcript_file,
                         summary_path=summary_path,
                         audio_path=self.transcriber.audio_file if self.config.keep_audio else None,
                         timestamp=self.recording_timestamp,
-                        title=f"Meeting {self.recording_timestamp.strftime('%Y-%m-%d %H:%M')}"
+                        title=sanitized_title
                     )
 
-                    self.update_status(f"✅ Saved! ({len(result)} files)")
+                    content.update(f"✅ Saved! ({len(result)} files)\n\nPress [Q] to quit or [R] to record again")
+                    self.state = AppState.READY
                 else:
-                    self.update_status("⚠️  No transcript generated")
+                    content.update("⚠️  No transcript generated")
+                    time.sleep(2)
+                    self.show_dashboard()
             else:
-                self.update_status("⚠️  No audio recorded")
+                content.update("⚠️  No audio recorded")
+                time.sleep(2)
+                self.show_dashboard()
 
         except Exception as e:
-            self.update_status(f"❌ Error: {str(e)}")
+            content.update(f"❌ Error: {str(e)}\n\nPress [Q] to quit or [R] to try again")
+            self.state = AppState.READY
+
+    def _sanitize_title(self, title: str) -> str:
+        """Sanitize title for filename."""
+        # Replace spaces with hyphens
+        title = title.replace(" ", "-")
+        # Remove special characters except hyphens and underscores
+        title = re.sub(r'[^a-zA-Z0-9\-_]', '', title)
+        return title or "Untitled"
+
+    def action_context_enter(self) -> None:
+        """Context-aware Enter key."""
+        if self.state == AppState.READY:
+            # Start recording from dashboard
+            self.action_start_recording()
+        elif self.state == AppState.RECORDING and self.is_editing_title:
+            # Save title when editing
+            self.is_editing_title = False
+            self.show_recording_screen()
+
+    def action_edit_title(self) -> None:
+        """Start editing the meeting title."""
+        if self.state != AppState.RECORDING or self.is_editing_title:
+            return
+
+        self.is_editing_title = True
+        self.show_recording_screen()
+
+        # Create a simple input mechanism using the bell pattern
+        # User can type and we'll capture it
+        def handle_key(event):
+            if self.is_editing_title:
+                if hasattr(event, 'character') and event.character:
+                    if event.character.isprintable():
+                        self.meeting_title += event.character
+                        self.show_recording_screen()
+                elif hasattr(event, 'key'):
+                    if event.key == 'backspace':
+                        self.meeting_title = self.meeting_title[:-1] if self.meeting_title else ""
+                        self.show_recording_screen()
+
+    def action_cancel_title_edit(self) -> None:
+        """Cancel title editing."""
+        if self.is_editing_title:
+            self.is_editing_title = False
+            self.show_recording_screen()
+
+    def on_key(self, event) -> None:
+        """Handle key presses for title editing."""
+        if self.is_editing_title and self.state == AppState.RECORDING:
+            if event.character and event.character.isprintable():
+                self.meeting_title += event.character
+                self.show_recording_screen()
+                event.prevent_default()
+            elif event.key == "backspace":
+                self.meeting_title = self.meeting_title[:-1] if self.meeting_title else ""
+                self.show_recording_screen()
+                event.prevent_default()
+
+    def action_quit_app(self) -> None:
+        """Quit application."""
+        if self.state == AppState.RECORDING:
+            # Cancel recording first
+            self.action_cancel_recording()
+        self.exit()
 
 
 def run_tui():

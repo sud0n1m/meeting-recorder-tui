@@ -19,8 +19,8 @@ whisper:
 
 # Summarization settings
 summarization:
-  ollama_endpoint: "http://localhost:11434"
-  model: "llama3.2:3b"  # Or llama3.1:8b for better quality
+  ollama_endpoint: "https://ollama.firecorn.net"
+  model: "qwen3:8b-q8_0"  # Higher quality 8-bit quantization for better summarization
 
 # Output settings
 output:

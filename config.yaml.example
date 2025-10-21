@@ -1,0 +1,42 @@
+# Meeting Recorder Configuration (Example)
+# Copy this file to config.yaml and customize for your setup
+
+# Output directory settings
+output_dir:
+  base_path: "/home/username/Documents/Obsidian Vault"  # Path to your Obsidian vault
+  meetings_subdir: "meetings"  # Subdirectory within base_path for meeting notes
+
+# Audio settings
+audio:
+  sample_rate: 16000  # Whisper works best with 16kHz
+  format: s16le       # 16-bit PCM signed little-endian
+  channels: 1         # Mono (mic + speakers mixed)
+
+# Transcription settings
+whisper:
+  model: base       # Options: tiny, base, small, medium, large
+  device: cpu       # Options: cpu, cuda, auto
+  language: en      # Language code (en, es, fr, etc.)
+
+# Summarization settings
+summarization:
+  ollama_endpoint: "https://ollama.firecorn.net"  # Ollama server endpoint (HTTPS, no port)
+  model: "qwen2.5:14b"  # Recommended for 12GB GPU (RTX 2000 ADA)
+  # Alternative models:
+  # model: "llama3.1:8b"    # Faster, still good quality
+  # model: "qwen2.5:7b"     # Good balance
+  # model: "mistral:7b"     # Maximum speed
+  # model: "llama3.2:3b"    # Lightweight for low-end hardware
+
+# Output settings
+output:
+  keep_audio: true  # Keep audio files after transcription
+  timestamp_format: "%Y-%m-%d_%H-%M-%S"  # Format for file timestamps
+
+# Version 0.2 settings (planned)
+# Uncomment when v0.2 is released:
+# output:
+#   audio_format: "opus"  # Options: wav, opus, mp3
+#   opus_bitrate: 16      # kbps (12-24 range for speech)
+#   mp3_bitrate: 64       # kbps (if mp3 selected)
+#   delete_wav_after_conversion: true  # Keep only compressed version

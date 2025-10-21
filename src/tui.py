@@ -167,6 +167,7 @@ Press [Q] to Quit"""
             self.transcriber = Transcriber(
                 model_size=self.config.whisper_model,
                 device=self.config.whisper_device,
+                compute_type=self.config.whisper_compute_type,
                 output_dir=Path("./recordings")
             )
 

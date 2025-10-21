@@ -14,7 +14,8 @@ audio:
 # Transcription settings
 whisper:
   model: base  # Options: tiny, base, small, medium, large
-  device: cpu  # Options: cpu, cuda, auto
+  device: auto  # Options: cpu, cuda, auto (auto tries cuda first, falls back to cpu)
+  compute_type: default  # Options: default, int8, int8_float16, float16 (int8 is faster on CPU)
   language: en
 
 # Summarization settings

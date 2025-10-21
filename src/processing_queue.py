@@ -36,6 +36,7 @@ class ProcessingJob:
     title: str
     whisper_model: str
     whisper_device: str
+    whisper_compute_type: str
     ollama_model: str
     ollama_endpoint: str
     meetings_dir: Path
@@ -107,6 +108,7 @@ class ProcessingQueue:
             title=title,
             whisper_model=self.config.whisper_model,
             whisper_device=self.config.whisper_device,
+            whisper_compute_type=self.config.whisper_compute_type,
             ollama_model=self.config.ollama_model,
             ollama_endpoint=self.config.ollama_endpoint,
             meetings_dir=self.config.meetings_dir,
@@ -200,6 +202,7 @@ class ProcessingQueue:
         transcriber = Transcriber(
             model_size=job.whisper_model,
             device=job.whisper_device,
+            compute_type=job.whisper_compute_type,
             output_dir=job.audio_file.parent
         )
 

@@ -76,6 +76,11 @@ class Config:
         return self.get("whisper.device", "cpu")
 
     @property
+    def whisper_compute_type(self) -> str:
+        """Get Whisper compute type."""
+        return self.get("whisper.compute_type", "default")
+
+    @property
     def ollama_endpoint(self) -> str:
         """Get Ollama endpoint URL."""
         return self.get("summarization.ollama_endpoint", "http://localhost:11434")

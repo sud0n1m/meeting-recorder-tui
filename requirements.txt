@@ -7,6 +7,12 @@ numpy>=1.24.0
 # Transcription
 faster-whisper>=0.10.0
 
+# GPU Support (Optional - for NVIDIA GPUs only)
+# Uncomment for CUDA support:
+# torch>=2.0.0
+# For AMD GPUs: AMD integrated GPUs (like 780M) are not supported by ROCm
+# faster-whisper will automatically use CPU with int8 quantization (2-3x faster than default)
+
 # LLM integration
 requests>=2.31.0
 

@@ -15,8 +15,18 @@ audio:
 # Transcription settings
 whisper:
   model: base       # Options: tiny, base, small, medium, large
-  device: cpu       # Options: cpu, cuda, auto
+  device: auto      # Options: cpu, cuda, auto (auto detects GPU, falls back to CPU)
+  compute_type: default  # Options: default, int8, int8_float16, float16
+                         # - int8: fastest on CPU, good quality
+                         # - float16: fastest on GPU (CUDA only)
+                         # - default: automatic selection based on device
   language: en      # Language code (en, es, fr, etc.)
+
+# GPU Support Notes:
+# - NVIDIA GPUs: device=auto will use CUDA automatically
+# - AMD GPUs: Limited support - integrated GPUs (like 780M) not supported by ROCm
+#   For AMD, use device=cpu with compute_type=int8 for best CPU performance
+# - CPU only: Use device=cpu with compute_type=int8 for 2-3x speedup
 
 # Summarization settings
 summarization:

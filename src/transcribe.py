@@ -20,6 +20,7 @@ class Transcriber:
         self,
         model_size: str = "base",
         device: str = "auto",
+        compute_type: str = "default",
         output_dir: Optional[Path] = None
     ):
         """
@@ -28,10 +29,14 @@ class Transcriber:
         Args:
             model_size: Whisper model size (tiny, base, small, medium, large)
             device: Device to use (auto, cpu, cuda)
+            compute_type: Compute type (default, int8, int8_float16, float16)
             output_dir: Directory to save transcripts (default: current dir)
         """
         self.model_size = model_size
-        self.device = device if device != "auto" else "cpu"  # Default to CPU for now
+        self.device = device
+        self.compute_type = compute_type
+        self.actual_device = None  # Will be set after model load
+        self.actual_compute_type = None  # Will be set after model load
         self.output_dir = output_dir or Path.cwd()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -47,15 +52,72 @@ class Transcriber:
 
         self.on_segment: Optional[Callable[[str], None]] = None
 
+    def _detect_device_and_compute_type(self):
+        """Detect the best device and compute type configuration."""
+        device = self.device
+        compute_type = self.compute_type
+
+        # Auto-detect device
+        if device == "auto":
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    device = "cuda"
+                    if compute_type == "default":
+                        compute_type = "float16"
+                else:
+                    device = "cpu"
+                    if compute_type == "default":
+                        compute_type = "int8"
+            except ImportError:
+                device = "cpu"
+                if compute_type == "default":
+                    compute_type = "int8"
+        else:
+            # Manual device selection
+            if compute_type == "default":
+                compute_type = "int8" if device == "cpu" else "float16"
+
+        return device, compute_type
+
     def load_model(self):
-        """Load the Whisper model."""
-        print(f"Loading Whisper model '{self.model_size}' on {self.device}...")
-        self.model = WhisperModel(
-            self.model_size,
-            device=self.device,
-            compute_type="int8"  # Use int8 for faster CPU inference
-        )
-        print("Model loaded successfully")
+        """Load the Whisper model with device detection."""
+        device, compute_type = self._detect_device_and_compute_type()
+
+        print(f"Loading Whisper model '{self.model_size}'...")
+        print(f"  Device: {device} (requested: {self.device})")
+        print(f"  Compute type: {compute_type} (requested: {self.compute_type})")
+
+        try:
+            self.model = WhisperModel(
+                self.model_size,
+                device=device,
+                compute_type=compute_type
+            )
+            self.actual_device = device
+            self.actual_compute_type = compute_type
+            print("Model loaded successfully")
+        except Exception as e:
+            # Fallback to CPU with int8 if GPU fails
+            if device != "cpu":
+                print(f"Warning: Failed to load on {device}, falling back to CPU")
+                print(f"  Error: {e}")
+                self.model = WhisperModel(
+                    self.model_size,
+                    device="cpu",
+                    compute_type="int8"
+                )
+                self.actual_device = "cpu"
+                self.actual_compute_type = "int8"
+                print("Model loaded on CPU")
+            else:
+                raise
+
+    def get_device_info(self) -> str:
+        """Get information about the loaded device."""
+        if self.actual_device is None:
+            return "Model not loaded"
+        return f"{self.actual_device} ({self.actual_compute_type})"
 
     def start_recording(self, source_name: str) -> bool:
         """

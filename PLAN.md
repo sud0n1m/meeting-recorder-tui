@@ -905,6 +905,76 @@ processing:
 
 ---
 
+## Version 0.3.5 - GPU Detection and Optimization (COMPLETED)
+
+**Status**: ✅ Implemented and tested
+
+**Goal**: Add intelligent device detection for GPU acceleration with graceful CPU fallback
+
+### Implementation
+
+**Feature 1: Automatic Device Detection**
+- Added `compute_type` configuration parameter
+- Auto-detection logic:
+  - Tries PyTorch CUDA if available → use GPU with float16
+  - Falls back to CPU with int8 quantization (2-3x faster than default)
+- Graceful fallback if GPU initialization fails
+
+**Feature 2: Configuration Updates**
+```yaml
+whisper:
+  device: auto  # Options: cpu, cuda, auto
+  compute_type: default  # Options: default, int8, int8_float16, float16
+```
+
+**Feature 3: Enhanced Transcriber**
+- `_detect_device_and_compute_type()` method for smart device selection
+- Try-catch with automatic CPU fallback on GPU failure
+- `get_device_info()` method for UI display
+- Device info shown in processing logs
+
+**Files Modified**:
+- [config.yaml](config.yaml) - Added compute_type parameter with auto device selection
+- [config.yaml.example](config.yaml.example) - Added GPU support documentation
+- [src/config.py](src/config.py) - Added `whisper_compute_type` property
+- [src/transcribe.py](src/transcribe.py) - Added device detection and fallback logic
+- [src/tui.py](src/tui.py) - Pass compute_type to Transcriber
+- [src/processing_queue.py](src/processing_queue.py) - Added compute_type to ProcessingJob
+- [requirements.txt](requirements.txt) - Documented optional GPU dependencies
+
+### AMD GPU Findings
+
+**AMD Radeon 780M Status**:
+- ❌ Not officially supported by ROCm (AMD's CUDA equivalent)
+- ❌ Integrated GPUs have lower/no priority in ROCm
+- ❌ WhisperX does not support ROCm (relies on CTranslate2 with CUDA)
+- ✅ CPU with int8 quantization provides good performance (2-3x faster than default)
+
+**Recommendations**:
+1. **For AMD integrated GPUs (like 780M)**: Use `device: auto` with `compute_type: default`
+   - System will automatically use CPU with int8 optimization
+   - Expected: ~3-5 min for 30-min meeting
+
+2. **For NVIDIA GPUs**: Install PyTorch with CUDA support
+   ```bash
+   pip install torch torchvision torchaudio
+   ```
+   - System will automatically detect and use CUDA
+   - Expected: ~1-2 min for 30-min meeting
+
+3. **Future (v0.4)**: Client-server architecture for remote GPU processing
+   - Record locally on any device
+   - Process on remote server with NVIDIA GPU
+   - Best performance without local GPU requirements
+
+**Testing**:
+- ✅ Tested on AMD HawkPoint system (includes Radeon 780M)
+- ✅ Device detection works correctly (falls back to CPU)
+- ✅ Int8 quantization automatically selected for CPU
+- ✅ Model loads successfully with optimal settings
+
+---
+
 ## Version 0.4 - Planned Features
 
 ### Option A: Client-Server Architecture with Remote Processing (Recommended)

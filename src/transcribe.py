@@ -7,10 +7,14 @@ Captures audio from PipeWire and transcribes incrementally.
 import subprocess
 import threading
 import time
+import logging
 from pathlib import Path
 from typing import Optional, Callable
 from datetime import datetime
 from faster_whisper import WhisperModel
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 class Transcriber:
@@ -226,42 +230,58 @@ class Transcriber:
             Full transcript text
         """
         if not self.model:
+            logger.info("Model not loaded, loading now...")
             self.load_model()
 
-        print(f"\nTranscribing {audio_path}...")
+        logger.info(f"Transcribing {audio_path}...")
+        logger.info(f"  File exists: {audio_path.exists()}")
+        if audio_path.exists():
+            logger.info(f"  File size: {audio_path.stat().st_size} bytes")
 
-        segments, info = self.model.transcribe(
-            str(audio_path),
-            language="en",
-            beam_size=5,
-            vad_filter=True,  # Voice activity detection
-            vad_parameters=dict(
-                min_silence_duration_ms=500  # 500ms silence to split segments
+        try:
+            segments, info = self.model.transcribe(
+                str(audio_path),
+                language="en",
+                beam_size=5,
+                vad_filter=True,  # Voice activity detection
+                vad_parameters=dict(
+                    min_silence_duration_ms=500  # 500ms silence to split segments
+                )
             )
-        )
 
-        print(f"Detected language: {info.language} (probability: {info.language_probability:.2f})")
+            logger.info(f"Detected language: {info.language} (probability: {info.language_probability:.2f})")
 
-        transcript_parts = []
+            transcript_parts = []
+            segment_count = 0
 
-        for segment in segments:
-            text = segment.text.strip()
-            timestamp = f"[{self._format_timestamp(segment.start)}]"
+            for segment in segments:
+                segment_count += 1
+                text = segment.text.strip()
+                timestamp = f"[{self._format_timestamp(segment.start)}]"
 
-            # Add to transcript with timestamp
-            line = f"{timestamp} {text}\n"
-            transcript_parts.append(line)
+                # Add to transcript with timestamp
+                line = f"{timestamp} {text}\n"
+                transcript_parts.append(line)
 
-            # Save incrementally
-            self._append_to_file(line)
+                # Save incrementally
+                self._append_to_file(line)
 
-            # Call callback if set
-            if self.on_segment:
-                self.on_segment(text)
+                # Call callback if set
+                if self.on_segment:
+                    self.on_segment(text)
 
-            print(f"{timestamp} {text}")
+                logger.debug(f"{timestamp} {text}")
 
-        return "".join(transcript_parts)
+            logger.info(f"Transcription complete: {segment_count} segments")
+
+            if segment_count == 0:
+                logger.warning("No segments transcribed! Audio may be silent or unreadable")
+
+            return "".join(transcript_parts)
+
+        except Exception as e:
+            logger.error(f"Transcription failed: {str(e)}", exc_info=True)
+            raise
 
     def _format_timestamp(self, seconds: float) -> str:
         """Format seconds as HH:MM:SS."""

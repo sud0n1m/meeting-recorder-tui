@@ -7,6 +7,7 @@ Allows back-to-back meetings without waiting for transcription/summarization.
 import queue
 import threading
 import time
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,17 @@ from summarize import Summarizer
 from markdown_writer import MarkdownWriter
 from config import Config
 from server_client import ServerClient, ServerStatus
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('meeting_recorder.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 class JobStatus(Enum):
@@ -160,6 +172,10 @@ class ProcessingQueue:
                 # Get next job with timeout
                 job = self.queue.get(timeout=1)
 
+                logger.info(f"Starting job: {job.job_id}")
+                logger.info(f"  Title: {job.title}")
+                logger.info(f"  Audio: {job.audio_file}")
+
                 # Update status
                 with self.lock:
                     job.status = JobStatus.PROCESSING
@@ -172,10 +188,13 @@ class ProcessingQueue:
                     # Mark as completed
                     with self.lock:
                         job.status = JobStatus.COMPLETED
+                    logger.info(f"✓ Job completed successfully: {job.job_id}")
                     self._notify_status_change(job)
 
                 except Exception as e:
                     # Mark as failed
+                    logger.error(f"✗ Job failed: {job.job_id}")
+                    logger.error(f"  Error: {str(e)}", exc_info=True)
                     with self.lock:
                         job.status = JobStatus.FAILED
                         job.error_message = str(e)
@@ -295,7 +314,13 @@ class ProcessingQueue:
         Args:
             job: ProcessingJob to process
         """
+        logger.info("Starting local processing")
+        logger.info(f"  Model: {job.whisper_model}")
+        logger.info(f"  Device: {job.whisper_device}")
+        logger.info(f"  Compute type: {job.whisper_compute_type}")
+
         # Initialize transcriber
+        logger.info("Initializing transcriber...")
         transcriber = Transcriber(
             model_size=job.whisper_model,
             device=job.whisper_device,
@@ -305,25 +330,45 @@ class ProcessingQueue:
 
         # Set the audio file
         transcriber.audio_file = job.audio_file
+        logger.info(f"Audio file: {job.audio_file}")
+        logger.info(f"Audio size: {job.audio_file.stat().st_size / 1024 / 1024:.1f} MB")
 
         # Load Whisper model
+        logger.info("Loading Whisper model...")
         transcriber.load_model()
+        logger.info(f"Model loaded on: {transcriber.get_device_info()}")
 
         # Transcribe
+        logger.info("Starting transcription...")
         transcriber.transcribe_audio(job.audio_file)
+        logger.info("Transcription completed")
 
         # Check if transcription succeeded
         if not transcriber.transcript_file or not transcriber.transcript_file.exists():
+            logger.error(f"Transcript file not found: {transcriber.transcript_file}")
             raise Exception("Transcription failed - no transcript file generated")
 
+        logger.info(f"Transcript file: {transcriber.transcript_file}")
+        transcript_size = transcriber.transcript_file.stat().st_size
+        logger.info(f"Transcript size: {transcript_size} bytes")
+
+        if transcript_size < 100:
+            logger.warning(f"Transcript file is very small ({transcript_size} bytes), may be empty")
+
         # Summarize
+        logger.info("Starting summarization...")
+        logger.info(f"  LLM: {job.ollama_model}")
+        logger.info(f"  Endpoint: {job.ollama_endpoint}")
         summarizer = Summarizer(
             model=job.ollama_model,
             endpoint=job.ollama_endpoint
         )
         summary_path = summarizer.summarize_file(transcriber.transcript_file)
+        logger.info(f"Summary file: {summary_path}")
 
         # Save to markdown
+        logger.info("Writing markdown file...")
+        logger.info(f"  Output dir: {job.meetings_dir}")
         markdown_writer = MarkdownWriter(output_dir=job.meetings_dir)
         markdown_writer.write_meeting(
             transcript_path=transcriber.transcript_file,
@@ -332,6 +377,7 @@ class ProcessingQueue:
             timestamp=job.timestamp,
             title=job.title
         )
+        logger.info("Markdown file written successfully")
 
     def _save_server_results(self, job: ProcessingJob, transcript: str, summary: str) -> None:
         """
